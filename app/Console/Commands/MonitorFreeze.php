@@ -4,6 +4,8 @@ namespace App\Console\Commands;
 
 use App\Jobs\RunJob;
 use App\Models\Freeze;
+use DateTime;
+use DateTimeZone;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
@@ -44,17 +46,17 @@ class MonitorFreeze extends Command
 
         $str = explode(',', end($output));
 
-        Log::info('time: ' . end($output));
+        preg_match('/(\d{14})\.(\d+)([+-]\d+)/', $str[1], $matches);
 
-        // Parse wmic time: yyyyMMddHHmmss.mmmmmmsUUU
-        $dt = \DateTime::createFromFormat('YmdHis.uO', $str[1]);
+        $dt = DateTime::createFromFormat('YmdHis', $matches[1]);
 
-        if (!$dt) {
-            $this->error("Could not parse creation time for {$processName}");
-            return;
-        }
+        $dt->modify(-(int)$matches[3] . ' minutes');
 
-        $runtimeMinutes = now()->diffInMinutes($dt);
+        Log::info('start time: ' . $dt->format('Y-m-d H:i:s'));
+        Log::info('current time: ' . (new DateTime())->format('Y-m-d H:i:s'));
+        $runtimeMinutes = (time() - $dt->getTimestamp()) / 60;
+
+        Log::info('process ' . $processName . ' is running for minutes: ' . $runtimeMinutes);
 
         if ($runtimeMinutes >= 60) {
             $dependentProcess = 'e' . $processName;
