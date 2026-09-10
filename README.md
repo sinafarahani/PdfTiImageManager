@@ -22,36 +22,64 @@ on a Windows server.
 
 ## Requirements
 
-- Windows (workers are started with `start` and watched with `tasklist`)
-- PHP 8.3 or newer with `pdo_sqlite` (or `pdo_mysql` for MySQL); running the tests needs PHP 8.4
-- Composer, and Node.js 20+ to build the frontend
+- Windows (workers are started with `start`, watched with `tasklist` and, when frozen, ended with `taskkill`)
+- PHP 8.4.1 or newer with the `fileinfo`, `mbstring`, `openssl` and `pdo_sqlite` (or `pdo_mysql`) extensions enabled
+  in `php.ini`
+- To build: Composer and Node.js 22.12 or newer (20.19 is enough for `npm run build`) on a machine with internet access
 
 ## Installation
 
-```bat
-composer install --no-dev --optimize-autoloader
-copy .env.example .env
-php artisan key:generate
-type nul > database\database.sqlite
-php artisan migrate --force
-php artisan db:seed --force
-npm ci
-npm run build
-```
+The server has no internet access, so the dependencies are installed and the frontend is built on another machine.
 
-Edit `.env` first: `PDF_TO_IMG_DIR`, `RUNNER_DIR`, `MAX_AVAILABLE_SPACE`, `SHARE_ROOT`, and optionally
-`ADMIN_EMAIL` / `ADMIN_PASSWORD`. `db:seed` creates the administrator; without `ADMIN_PASSWORD` it prints a random
-password once.
+1. On a machine with internet access and the same PHP version:
+
+   ```bat
+   composer install --no-dev --optimize-autoloader
+   npm ci
+   npm run build
+   ```
+
+2. Copy the project to the server, including `vendor` and `public\build` (`node_modules` is not needed).
+3. On the server:
+
+   ```bat
+   copy .env.example .env
+   php artisan key:generate
+   type nul > database\database.sqlite
+   php artisan migrate --force
+   php artisan db:seed --force
+   ```
+
+   Before `migrate`, edit `.env`: `APP_ENV=production` and `APP_DEBUG=false` (debug pages show paths and code),
+   `APP_URL`, `PDF_TO_IMG_DIR`, `RUNNER_DIR`, `MAX_AVAILABLE_SPACE`, `SHARE_ROOT`, and optionally `ADMIN_EMAIL` /
+   `ADMIN_PASSWORD`. `db:seed` creates the administrator; without `ADMIN_PASSWORD` it prints a random password once.
 
 The default database is SQLite (`database/database.sqlite`), which needs no database server. To use MySQL instead, set
 `DB_CONNECTION=mysql` and the `DB_*` values in `.env`.
 
+## Upgrading from the previous version of the panel
+
+1. Stop the converters with the old panel and wait until the workers have exited.
+2. Stop the queue workers and the scheduler.
+3. Replace the code with the new build (step 1 and 2 of the installation). Keep `.env` (with `APP_KEY` and the
+   `DB_*` settings) and the `storage` folder.
+4. Add the new keys to `.env`: `SHARE_ROOT`, `FORCE_STOP_AFTER_MINUTES`, `ADMIN_EMAIL`, and set `APP_ENV=production`
+   and `APP_DEBUG=false`.
+5. Run `php artisan migrate --force` and `php artisan optimize:clear`.
+6. The password of the administrator created by the old seeder is public in the repository history: change it on the
+   profile page, or set `ADMIN_PASSWORD` and run `php artisan db:seed --force`.
+7. Start the queue workers and the scheduler again (see below), then start the converters from the panel.
+
+If the panel loses its state while workers run (for example after `php artisan cache:clear`), Start does not start a
+second set of workers: it shows the running workers and the Stop button again.
+
 ## Running
 
-- Web server: `php artisan serve --host=0.0.0.0 --port=8000` (or IIS / nginx pointing at `public`).
+- Web server: `php artisan serve --host=0.0.0.0 --port=8000` (or nginx with `public` as the document root).
 - Queue workers: `php artisan queue:work --timeout=0`. Every running process keeps one queue worker busy while its
   runner runs, so run at least as many queue workers as the number of processes you start. After a quick Stop and
-  Start, the new start jobs wait until the old runs have finished.
+  Start, the new start jobs wait until the old runs have finished. Never retry failed start jobs (`queue:retry`): that
+  could start a second worker in the same folder.
 - Scheduler: `php artisan schedule:work` (or Task Scheduler running `php artisan schedule:run` every minute). It runs
   `converters:end-frozen`, which ends workers still running `FORCE_STOP_AFTER_MINUTES` after a Stop. A Start that is
   waiting for a frozen previous run also ends it after that time, so a quick Stop and Start never hangs.
@@ -65,12 +93,14 @@ For development, `composer run dev` starts the web server, a queue worker and Vi
 | `PDF_TO_IMG_DIR` | | Folder with one folder per worker; folder `0` is the template |
 | `RUNNER_DIR` | | Runner executable started for every worker |
 | `MAX_AVAILABLE_SPACE` | `200` | Space in GB shared by the workers |
-| `SHARE_ROOT` | `d:` | Drive or folder of the workers' share folders (`<SHARE_ROOT>\<n>\`) |
+| `SHARE_ROOT` | `f:` | Drive or folder of the workers' share folders (`<SHARE_ROOT>\<n>\`) |
 | `FORCE_STOP_AFTER_MINUTES` | `10` | A worker still running this long after Stop is frozen and is ended by force |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | `admin@example.com` / random | Administrator created by `php artisan db:seed` |
-| `DB_QUEUE_RETRY_AFTER` | `86400` | Seconds before an unfinished queued job may be handed to another worker |
+| `DB_QUEUE_RETRY_AFTER` | `315360000` (10 years) | Seconds before an unfinished queued job may be handed to another worker |
 
 ## Tests
+
+The tests need the development dependencies (`composer install` without `--no-dev`):
 
 ```bat
 php artisan test

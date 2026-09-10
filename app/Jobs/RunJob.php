@@ -42,7 +42,6 @@ class RunJob implements ShouldQueue
     {
         $folderName = basename($this->dirPath);
         $exeFile = "e{$folderName}.exe";
-        $statusFile = $this->dirPath.DIRECTORY_SEPARATOR.'status.txt';
 
         // After a quick Stop and Start the previous run of this worker may still be finishing its current file. Leave
         // "terminate" in status.txt so that the bridge ends it at a safe point, and start once it has exited. A previous
@@ -58,16 +57,7 @@ class RunJob implements ShouldQueue
             return;
         }
 
-        File::put($statusFile, '');
-        File::put($this->dirPath.DIRECTORY_SEPARATOR.'log.txt', '');
-
-        // share.txt: the worker's share folder, then its part of the available space in bytes (a whole number).
-        $shareRoot = rtrim((string) config('app.shareRoot'), '\\/');
-        $bytesPerWorker = intdiv((int) config('app.maxSize') * 1024 ** 3, max(1, $this->threads));
-        File::put(
-            $this->dirPath.DIRECTORY_SEPARATOR.'share.txt',
-            "{$shareRoot}\\{$folderName}\\".PHP_EOL.$bytesPerWorker,
-        );
+        $this->prepareWorkerFiles();
 
         // 1. Start the long-running exe (non-blocking)
         $command = "cd /d \"{$this->dirPath}\" && Start \"\" \"{$exeFile}\"";
@@ -91,12 +81,30 @@ class RunJob implements ShouldQueue
     }
 
     /**
-     * Whether the Start that dispatched this job is still what the panel wants (jobs queued by older versions of the
-     * panel carry no version and always start).
+     * Clears status.txt and log.txt and writes share.txt: the worker's share folder, then its part of the available
+     * space in bytes (a whole number).
+     */
+    protected function prepareWorkerFiles(): void
+    {
+        $folderName = basename($this->dirPath);
+        $shareRoot = rtrim((string) config('app.shareRoot'), '\\/');
+        $bytesPerWorker = intdiv((int) config('app.maxSize') * 1024 ** 3, max(1, $this->threads));
+
+        File::put($this->dirPath.DIRECTORY_SEPARATOR.'status.txt', '');
+        File::put($this->dirPath.DIRECTORY_SEPARATOR.'log.txt', '');
+        File::put(
+            $this->dirPath.DIRECTORY_SEPARATOR.'share.txt',
+            "{$shareRoot}\\{$folderName}\\".PHP_EOL.$bytesPerWorker,
+        );
+    }
+
+    /**
+     * Whether the Start that dispatched this job is still what the panel wants. Jobs queued by older versions of the
+     * panel have no start version (the property is not even initialized when they are unserialized) and always start.
      */
     private function isCurrentStart(ConverterStatus $converterStatus): bool
     {
-        if ($this->startVersion === null) {
+        if (($this->startVersion ?? null) === null) {
             return true;
         }
 

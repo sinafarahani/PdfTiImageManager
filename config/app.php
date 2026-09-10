@@ -138,7 +138,7 @@ return [
     'pdfToImg' => env('PDF_TO_IMG_DIR', ''),
     'runnerPath' => env('RUNNER_DIR', ''),
     'maxSize' => env('MAX_AVAILABLE_SPACE', '200'),
-    'shareRoot' => env('SHARE_ROOT', 'd:'),
+    'shareRoot' => env('SHARE_ROOT', 'f:'),
     'forceStopAfterMinutes' => (int) env('FORCE_STOP_AFTER_MINUTES', 10),
 
     /*

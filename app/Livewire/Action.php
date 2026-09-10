@@ -6,6 +6,7 @@ use App\Actions\Converter\ConverterStatus;
 use App\Actions\Converter\StartConverters;
 use App\Actions\Converter\StopConverters;
 use App\Actions\Converter\WorkerProcesses;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Attributes\Locked;
@@ -76,6 +77,7 @@ class Action extends Component
         }
 
         if ($stateChanged) {
+            $this->resetErrorBag();
             $this->showState($state);
         }
 
@@ -89,6 +91,10 @@ class Action extends Component
 
         try {
             $started = $startConverters->start((int) $this->threads);
+        } catch (LockTimeoutException) {
+            $this->addError('threads', __('Another start or stop is in progress. Try again in a moment.'));
+
+            return;
         } catch (RuntimeException $exception) {
             report($exception);
             $this->addError('threads', $exception->getMessage());
@@ -108,7 +114,13 @@ class Action extends Component
     {
         Gate::authorize('start-action');
 
-        $stopConverters->stop();
+        try {
+            $stopConverters->stop();
+        } catch (LockTimeoutException) {
+            $this->addError('threads', __('Another start or stop is in progress. Try again in a moment.'));
+
+            return;
+        }
 
         $this->showState($converterStatus->current());
         $this->showWorkers($workerProcesses->overview());

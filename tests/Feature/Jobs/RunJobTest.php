@@ -9,6 +9,7 @@ use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Sleep;
+use ReflectionClass;
 use Tests\TestCase;
 
 class RunJobTest extends TestCase
@@ -81,5 +82,25 @@ class RunJobTest extends TestCase
 
         Process::assertRan(fn (PendingProcess $process): bool => $process->command === ['taskkill', '/F', '/T', '/PID', '4343']);
         Process::assertRan(fn (PendingProcess $process): bool => $process->command === ['taskkill', '/F', '/T', '/PID', '4242']);
+    }
+
+    public function test_writes_the_share_folder_and_the_workers_part_of_the_space(): void
+    {
+        config(['app.shareRoot' => 'f:', 'app.maxSize' => '200']);
+        $job = new RunJob($this->folder, 3, 'C:\\runner\\Forms_Runner.exe', 1);
+
+        (fn () => $this->prepareWorkerFiles())->call($job);
+
+        $this->assertStringEqualsFile($this->folder.DIRECTORY_SEPARATOR.'share.txt', 'f:\\3\\'.PHP_EOL.'71582788266');
+        $this->assertStringEqualsFile($this->folder.DIRECTORY_SEPARATOR.'status.txt', '');
+    }
+
+    public function test_a_job_queued_by_the_previous_version_of_the_panel_still_starts_its_worker(): void
+    {
+        $converterStatus = app(ConverterStatus::class);
+        $converterStatus->set(ConverterStatus::STOPPED);
+        $job = (new ReflectionClass(RunJob::class))->newInstanceWithoutConstructor();
+
+        $this->assertTrue((fn (): bool => $this->isCurrentStart($converterStatus))->call($job));
     }
 }

@@ -39,8 +39,9 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            // The converter jobs block while the workers run: never hand a job to a second worker meanwhile.
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 86400),
+            // The converter jobs block for as long as the workers run, which can be days: never hand a job to a second
+            // queue worker meanwhile (10 years).
+            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 315360000),
             'after_commit' => false,
         ],
 

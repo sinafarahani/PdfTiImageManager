@@ -8,9 +8,11 @@ use App\Livewire\Action;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Sleep;
 use Livewire\Livewire;
 use PHPUnit\Framework\Attributes\TestWith;
 use Tests\TestCase;
@@ -31,7 +33,7 @@ class ActionTest extends TestCase
         File::ensureDirectoryExists($base);
         File::put($base.DIRECTORY_SEPARATOR.'e0.exe', 'worker');
         File::put($base.DIRECTORY_SEPARATOR.'0.exe', 'converter');
-        File::put($base.DIRECTORY_SEPARATOR.'e0.exe.config', '<add key="SharedFolder" value="d:\\0\\" />');
+        File::put($base.DIRECTORY_SEPARATOR.'e0.exe.config', $this->workerConfig(0));
         File::put($base.DIRECTORY_SEPARATOR.'config.txt', '0');
 
         config([
@@ -116,7 +118,8 @@ class ActionTest extends TestCase
         $this->assertFileExists($worker.'2.exe');
         $this->assertFileDoesNotExist($worker.'e0.exe');
         $this->assertStringEqualsFile($worker.'config.txt', '2');
-        $this->assertStringEqualsFile($worker.'e2.exe.config', '<add key="SharedFolder" value="d:\\2\\" />');
+        $this->assertStringEqualsFile($worker.'e2.exe.config', $this->workerConfig(2));
+        $this->assertDirectoryDoesNotExist($worker.'..'.DIRECTORY_SEPARATOR.'2.partial');
         $this->assertSame(
             [$this->folder(0), $this->folder(1), $this->folder(2)],
             $this->dispatchedWorkerFolders(),
@@ -127,6 +130,7 @@ class ActionTest extends TestCase
     {
         foreach (range(1, 11) as $index) {
             File::ensureDirectoryExists($this->folder($index));
+            File::put($this->folder($index).DIRECTORY_SEPARATOR."e{$index}.exe", 'worker');
         }
         Bus::fake();
         $this->actingAs(User::factory()->admin()->create());
@@ -276,6 +280,7 @@ class ActionTest extends TestCase
     public function test_start_right_after_stop_shows_starting_while_the_previous_run_finishes(): void
     {
         File::ensureDirectoryExists($this->folder(1));
+        File::put($this->folder(1).DIRECTORY_SEPARATOR.'e1.exe', 'worker');
         app(ConverterStatus::class)->set(ConverterStatus::RUNNING, 2);
         $this->fakeRunningWorkers(0, 1);
         Bus::fake();
@@ -291,9 +296,108 @@ class ActionTest extends TestCase
             ->assertSeeHtml('wire:click="stop"');
     }
 
+    public function test_a_user_who_is_not_an_administrator_cannot_stop_the_converters(): void
+    {
+        app(ConverterStatus::class)->set(ConverterStatus::RUNNING, 1);
+        $this->actingAs(User::factory()->create());
+
+        Livewire::test(Action::class)->call('stop')->assertForbidden();
+
+        $this->assertFileDoesNotExist($this->folder(0).DIRECTORY_SEPARATOR.'status.txt');
+        $this->assertSame(ConverterStatus::RUNNING, app(ConverterStatus::class)->current()['status']);
+    }
+
+    public function test_start_reports_an_incomplete_worker_folder(): void
+    {
+        File::ensureDirectoryExists($this->folder(1));
+        Bus::fake();
+        $this->actingAs(User::factory()->admin()->create());
+
+        Livewire::test(Action::class)
+            ->set('threads', 2)
+            ->call('start')
+            ->assertHasErrors(['threads'])
+            ->assertSet('status', ConverterStatus::STOPPED);
+
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_start_shows_workers_that_run_although_the_panel_lost_its_state(): void
+    {
+        $this->fakeRunningWorkers(0, 1);
+        Bus::fake();
+        $this->actingAs(User::factory()->admin()->create());
+
+        Livewire::test(Action::class)
+            ->set('threads', 4)
+            ->call('start')
+            ->assertHasErrors(['threads'])
+            ->assertSet('status', ConverterStatus::RUNNING)
+            ->assertSet('runningThreads', 2)
+            ->assertSeeHtml('wire:click="stop"');
+
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_start_and_stop_report_a_start_or_stop_in_progress(): void
+    {
+        Sleep::fake(syncWithCarbon: true);
+        app(ConverterStatus::class)->lock()->get();
+        Bus::fake();
+        $this->actingAs(User::factory()->admin()->create());
+
+        Livewire::test(Action::class)
+            ->set('threads', 2)
+            ->call('start')
+            ->assertHasErrors(['threads'])
+            ->assertSet('status', ConverterStatus::STOPPED);
+
+        app(ConverterStatus::class)->set(ConverterStatus::RUNNING, 2);
+        Livewire::test(Action::class)
+            ->call('stop')
+            ->assertHasErrors(['threads'])
+            ->assertSet('status', ConverterStatus::RUNNING);
+
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_polling_clears_an_error_once_the_state_changes(): void
+    {
+        app(ConverterStatus::class)->set(ConverterStatus::RUNNING, 2);
+        $this->actingAs(User::factory()->admin()->create());
+        $component = Livewire::test(Action::class)->call('start')->assertHasErrors(['threads']);
+
+        app(ConverterStatus::class)->set(ConverterStatus::STOPPED);
+        $component->call('syncState');
+
+        $component->assertHasNoErrors();
+    }
+
+    public function test_shows_the_state_left_by_the_previous_version_of_the_panel(): void
+    {
+        Cache::forever('action_started', true);
+        Cache::forever('action_threads', '6');
+        $this->actingAs(User::factory()->admin()->create());
+
+        Livewire::test(Action::class)
+            ->assertSet('status', ConverterStatus::RUNNING)
+            ->assertSet('runningThreads', 6)
+            ->assertSeeHtml('wire:click="stop"');
+    }
+
     private function folder(int $index): string
     {
         return $this->root.DIRECTORY_SEPARATOR.$index;
+    }
+
+    /**
+     * The .NET configuration of worker $index as on the server, with doubled backslashes in the shared folder.
+     */
+    private function workerConfig(int $index): string
+    {
+        return '<?xml version="1.0" encoding="utf-8"?>'."\n"
+            .'<configuration><appSettings><add key="SharedFolder" value="f:\\\\'.$index.'\\\\"/></appSettings>'
+            .'<startup><supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.5.2"/></startup></configuration>';
     }
 
     /**
