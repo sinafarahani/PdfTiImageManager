@@ -2,63 +2,78 @@
 
 namespace App\Jobs;
 
-use App\Console\Commands\MonitorFreeze;
-use App\Console\Commands\SaveAllIDs;
+use App\Actions\Converter\ConverterStatus;
+use App\Actions\Converter\WorkerProcesses;
 use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Queue\InteractsWithQueue;
-use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
-use Illuminate\Support\Facades\Schedule;
-use Log;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Sleep;
 
 class RunJob implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
-
-    protected int $threads;
-    protected string $dirPath;
-
-    protected string $runnerPath;
+    use Queueable;
 
     /**
-     * Create a new job instance.
+     * Never start a worker twice: a second instance would process the same folder.
      */
-    public function __construct(string $dirPath, int $threads, string $runnerPath)
-    {
-        $this->threads = $threads;
-        $this->dirPath = $dirPath;
-        $this->runnerPath = $runnerPath;
-    }
+    public int $tries = 1;
 
     /**
-     * Execute the job.
+     * The runner blocks while the worker runs, which can take hours.
      */
-    public function handle(): void
+    public int $timeout = 0;
+
+    /**
+     * @param  int|null  $startVersion  Version of the panel state created by the Start that dispatched this job. When the
+     *                                  state has changed since (a Stop, or another Start), the job does nothing.
+     */
+    public function __construct(
+        protected string $dirPath,
+        protected int $threads,
+        protected string $runnerPath,
+        protected ?int $startVersion = null,
+    ) {}
+
+    /**
+     * Starts the worker in $dirPath (e{n}.exe) and then the runner, which blocks until it is done.
+     */
+    public function handle(ConverterStatus $converterStatus, WorkerProcesses $workerProcesses): void
     {
         $folderName = basename($this->dirPath);
         $exeFile = "e{$folderName}.exe";
+        $statusFile = $this->dirPath.DIRECTORY_SEPARATOR.'status.txt';
 
-        $statusFile = $this->dirPath . DIRECTORY_SEPARATOR . 'status.txt';
+        // After a quick Stop and Start the previous run of this worker may still be finishing its current file. Leave
+        // "terminate" in status.txt so that the bridge ends it at a safe point, and start once it has exited. A previous
+        // run that is still there long after the Stop is frozen and is ended by force.
+        while ($workerProcesses->stopIsPending($this->dirPath) && $workerProcesses->isRunning($exeFile) && $this->isCurrentStart($converterStatus)) {
+            $workerProcesses->endIfFrozen($this->dirPath);
+            Sleep::for(2)->seconds();
+        }
+
+        if (! $this->isCurrentStart($converterStatus)) {
+            Log::info("Worker {$folderName} not started: the converters were stopped or started again in the meantime.");
+
+            return;
+        }
+
         File::put($statusFile, '');
+        File::put($this->dirPath.DIRECTORY_SEPARATOR.'log.txt', '');
 
-        $logFile = $this->dirPath . DIRECTORY_SEPARATOR . 'log.txt';
-        File::put($logFile, '');
-
-        $sizeMangerFile = $this->dirPath . DIRECTORY_SEPARATOR . 'share.txt';
-
-        $content = "f:\\{$folderName}\\" . PHP_EOL;
-        $content .= (int) config('app.maxSize') * 1024 * 1024 * 1024 / $this->threads;
-
-        File::put($sizeMangerFile, $content);
+        // share.txt: the worker's share folder, then its part of the available space in bytes (a whole number).
+        $shareRoot = rtrim((string) config('app.shareRoot'), '\\/');
+        $bytesPerWorker = intdiv((int) config('app.maxSize') * 1024 ** 3, max(1, $this->threads));
+        File::put(
+            $this->dirPath.DIRECTORY_SEPARATOR.'share.txt',
+            "{$shareRoot}\\{$folderName}\\".PHP_EOL.$bytesPerWorker,
+        );
 
         // 1. Start the long-running exe (non-blocking)
         $command = "cd /d \"{$this->dirPath}\" && Start \"\" \"{$exeFile}\"";
-        pclose(popen($command,"r"));
+        pclose(popen($command, 'r'));
 
-        // 2. Then run the runner (blocking, queue waits until finished)
+        // 2. Then run the runner (blocking, the queue waits until it has finished)
         $command2 = "\"{$this->runnerPath}\" \"{$exeFile}\"";
 
         exec($command2, $output2, $status2);
@@ -73,10 +88,20 @@ class RunJob implements ShouldQueue
                 'output' => $output2,
             ]);
         }
-        $flagKey = "enabled_$folderName";
+    }
 
-        if (!Cache::has($flagKey)) {
-            Cache::put($flagKey, true);
+    /**
+     * Whether the Start that dispatched this job is still what the panel wants (jobs queued by older versions of the
+     * panel carry no version and always start).
+     */
+    private function isCurrentStart(ConverterStatus $converterStatus): bool
+    {
+        if ($this->startVersion === null) {
+            return true;
         }
+
+        $state = $converterStatus->current();
+
+        return $state['status'] === ConverterStatus::RUNNING && $state['version'] === $this->startVersion;
     }
 }
