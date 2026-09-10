@@ -10,6 +10,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Process;
 use Livewire\Livewire;
 use PHPUnit\Framework\Attributes\TestWith;
 use Tests\TestCase;
@@ -37,6 +38,9 @@ class ActionTest extends TestCase
             'app.pdfToImg' => $this->root,
             'app.runnerPath' => 'C:\\runner\\Forms_Runner.exe',
         ]);
+
+        Process::preventStrayProcesses();
+        $this->fakeRunningWorkers();
     }
 
     protected function tearDown(): void
@@ -232,9 +236,74 @@ class ActionTest extends TestCase
         $component->assertSee('6 processes');
     }
 
+    public function test_shows_starting_until_every_worker_runs_and_keeps_stop_available(): void
+    {
+        app(ConverterStatus::class)->set(ConverterStatus::RUNNING, 2);
+        $this->fakeRunningWorkers(0);
+        $this->actingAs(User::factory()->admin()->create());
+
+        $component = Livewire::test(Action::class)
+            ->assertSee('Starting')
+            ->assertSee('1 of 2 processes started')
+            ->assertSeeHtml('wire:click="stop"');
+
+        $this->fakeRunningWorkers(0, 1);
+        $this->travel(3)->seconds();
+        $component->call('syncState');
+
+        $component->assertSee('Started')->assertSee('2 processes')->assertDontSee('Starting');
+    }
+
+    public function test_shows_stopping_while_workers_finish_and_keeps_start_available(): void
+    {
+        File::put($this->folder(0).DIRECTORY_SEPARATOR.'status.txt', 'terminate');
+        $this->fakeRunningWorkers(0);
+        $this->actingAs(User::factory()->admin()->create());
+
+        $component = Livewire::test(Action::class)
+            ->assertSee('Stopping')
+            ->assertSee('1 process finishing')
+            ->assertSeeHtml('wire:submit="start"')
+            ->set('threads', 9);
+
+        $this->fakeRunningWorkers();
+        $this->travel(3)->seconds();
+        $component->call('syncState');
+
+        $component->assertSee('Stopped')->assertDontSee('Stopping')->assertSet('threads', 9);
+    }
+
+    public function test_start_right_after_stop_shows_starting_while_the_previous_run_finishes(): void
+    {
+        File::ensureDirectoryExists($this->folder(1));
+        app(ConverterStatus::class)->set(ConverterStatus::RUNNING, 2);
+        $this->fakeRunningWorkers(0, 1);
+        Bus::fake();
+        $this->actingAs(User::factory()->admin()->create());
+
+        Livewire::test(Action::class)
+            ->assertSee('Started')
+            ->call('stop')
+            ->assertSee('2 processes finishing')
+            ->set('threads', 2)
+            ->call('start')
+            ->assertSee('0 of 2 processes started')
+            ->assertSeeHtml('wire:click="stop"');
+    }
+
     private function folder(int $index): string
     {
         return $this->root.DIRECTORY_SEPARATOR.$index;
+    }
+
+    /**
+     * Makes tasklist list e{n}.exe for each of the given worker numbers.
+     */
+    private function fakeRunningWorkers(int ...$numbers): void
+    {
+        $lines = array_map(fn (int $number): string => "\"e{$number}.exe\",\"".(4000 + $number).'","Console","1","10,240 K"', $numbers);
+
+        Process::fake(['*tasklist*' => implode("\r\n", $lines)]);
     }
 
     /**

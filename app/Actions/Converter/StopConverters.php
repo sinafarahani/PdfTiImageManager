@@ -34,6 +34,7 @@ class StopConverters
                 }
             }
 
+            $this->workerProcesses->forgetOverview();
             $this->status->set(ConverterStatus::STOPPED);
 
             return true;

@@ -1,10 +1,20 @@
 @use('App\Actions\Converter\ConverterStatus')
 
 <div wire:poll.2s="syncState" class="flex flex-wrap items-center gap-4 p-6">
-    @if ($status === ConverterStatus::RUNNING)
+    @if ($status === ConverterStatus::RUNNING && $startedWorkers >= $runningThreads)
         <span class="inline-flex items-center gap-2 rounded-full bg-green-100 px-3 py-1 text-sm font-medium text-green-800">
             <span class="size-2 rounded-full bg-green-500"></span>
-            {{ __('Running') }} &middot; {{ trans_choice(':count process|:count processes', $runningThreads) }}
+            {{ __('Started') }} &middot; {{ trans_choice(':count process|:count processes', $runningThreads) }}
+        </span>
+    @elseif ($status === ConverterStatus::RUNNING)
+        <span class="inline-flex items-center gap-2 rounded-full bg-amber-100 px-3 py-1 text-sm font-medium text-amber-800">
+            <span class="size-2 animate-pulse rounded-full bg-amber-500"></span>
+            {{ __('Starting') }} &middot; {{ trans_choice(':started of :count process started|:started of :count processes started', $runningThreads, ['started' => $startedWorkers]) }}
+        </span>
+    @elseif ($startedWorkers + $stoppingWorkers > 0)
+        <span class="inline-flex items-center gap-2 rounded-full bg-amber-100 px-3 py-1 text-sm font-medium text-amber-800">
+            <span class="size-2 animate-pulse rounded-full bg-amber-500"></span>
+            {{ __('Stopping') }} &middot; {{ trans_choice(':count process finishing|:count processes finishing', $startedWorkers + $stoppingWorkers) }}
         </span>
     @else
         <span class="inline-flex items-center gap-2 rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700">

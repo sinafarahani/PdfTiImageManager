@@ -2,6 +2,7 @@
 
 namespace App\Actions\Converter;
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
@@ -12,6 +13,36 @@ use Illuminate\Support\Facades\Process;
  */
 class WorkerProcesses
 {
+    private const string OVERVIEW_KEY = 'converter.processes';
+
+    /**
+     * Numbers of the workers whose e{n}.exe is running: started ones, and stopping ones (asked to finish). Kept for two
+     * seconds, so that the dashboards open in several browsers share one tasklist call.
+     *
+     * @return array{started: list<int>, stopping: list<int>}
+     */
+    public function overview(): array
+    {
+        return Cache::remember(self::OVERVIEW_KEY, 2, function (): array {
+            $root = rtrim((string) config('app.pdfToImg'), '\\/');
+            $overview = ['started' => [], 'stopping' => []];
+
+            foreach ($this->runningWorkerNumbers() as $number) {
+                $overview[$this->stopIsPending($root.DIRECTORY_SEPARATOR.$number) ? 'stopping' : 'started'][] = $number;
+            }
+
+            return $overview;
+        });
+    }
+
+    /**
+     * Makes the next overview() look at the processes again, after the status files have changed.
+     */
+    public function forgetOverview(): void
+    {
+        Cache::forget(self::OVERVIEW_KEY);
+    }
+
     /**
      * Whether worker $folder has been asked to finish (status.txt = "terminate").
      */
@@ -61,6 +92,17 @@ class WorkerProcesses
         }
 
         return true;
+    }
+
+    /**
+     * @return list<int>
+     */
+    private function runningWorkerNumbers(): array
+    {
+        $result = Process::run(['tasklist', '/FO', 'CSV', '/NH']);
+        preg_match_all('/^"e(\d+)\.exe"/im', $result->output(), $matches);
+
+        return array_values(array_unique(array_map(intval(...), $matches[1])));
     }
 
     /**

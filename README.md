@@ -12,8 +12,11 @@ on a Windows server.
   previous run is still finishing starts again once that run has exited, and a Start followed by another Stop before
   its workers began is dropped. A worker normally finishes within a minute; one that is still running 10 minutes
   (`FORCE_STOP_AFTER_MINUTES`) after the Stop is frozen and is ended by force together with its child processes.
-- Every open browser shows the same state. The panel checks for changes every 2 seconds and only updates when someone
-  started or stopped, so a number you are typing is never reset.
+- The panel shows where the workers are: *Starting* (not every worker process is up yet), *Started*, *Stopping*
+  (workers still finishing their current file) and *Stopped*, read from the running `e{n}.exe` processes. These never
+  block the buttons: Stop is available while starting, Start while stopping.
+- Every open browser shows the same state. The panel checks for changes every 2 seconds and only updates when something
+  changed, so a number you are typing is never reset.
 - Only administrators (`users.is_admin`) can start and stop; other signed-in users see the status.
 - The interface works without internet access: fonts and scripts are bundled.
 
