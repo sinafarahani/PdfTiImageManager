@@ -43,7 +43,7 @@ class RetryConversions extends Command
 
     public function handle(ArchiveGateway $archive): int
     {
-        $failed = Conversion::query()->where('status', ConversionStatus::Failed);
+        $failed = Conversion::query();
 
         if (! $this->option('all') && $this->option('content') === [] && $this->option('stage') === null) {
             $this->components->error('Nothing selected. Pass --all, --content=<id> (repeatable), or --stage=<step>.');
@@ -56,8 +56,10 @@ class RetryConversions extends Command
             $failed->whereIn('content_id', array_map('strtolower', (array) $this->option('content')));
         }
 
+        $step = null;
+
         if (($stage = $this->option('stage')) !== null) {
-            if (Stage::tryFrom((string) $stage) === null) {
+            if (($step = Stage::tryFrom((string) $stage)) === null) {
                 $this->components->error(sprintf(
                     'There is no step "%s". The steps are: %s.',
                     $stage,
@@ -69,6 +71,11 @@ class RetryConversions extends Command
 
             $failed->where('failure_stage', $stage);
         }
+
+        // Contents of a profile that is not converted were cancelled rather than failed, and asking
+        // for that step by name is the only way to reach them. --all deliberately does not: a retry
+        // after an FTP outage would otherwise put a few hundred thousand of them back in the queue.
+        $failed->where('status', $step === Stage::Skipped ? ConversionStatus::Cancelled : ConversionStatus::Failed);
 
         // Taken in one pass over the oldest failures, so a run that hits the limit can simply be run
         // again; the attempt count goes back to zero because the fault was not the document's.

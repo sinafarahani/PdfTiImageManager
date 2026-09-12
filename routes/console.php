@@ -18,6 +18,13 @@ Schedule::command('converters:discover')
     ->withoutOverlapping();
 
 /*
+ * Takes the contents of the profiles named in CONVERTER_SKIP_PROFILES out of the queue, so that
+ * naming a profile in .env is all that is needed: whatever was already queued is retired here rather
+ * than one FTP connection at a time. A no-op when no profile is named.
+ */
+Schedule::command('converters:skip')->everyFifteenMinutes()->withoutOverlapping();
+
+/*
  * Puts conversions back whose worker died mid-way, after removing exactly the page rows and images
  * that attempt had created. This is what used to be done by hand with rebuild scripts.
  */

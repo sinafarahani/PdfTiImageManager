@@ -202,6 +202,40 @@ class ConvertOneContentTest extends TestCase
         $this->assertSame([], $this->archive->convertedContents());
     }
 
+    public function test_a_content_of_a_profile_that_is_not_converted_is_finished_without_touching_anything(): void
+    {
+        // The setting exists because a profile whose files have been taken off the store costs a whole
+        // FTP session per content to recognise. A content that reached a worker before the profile was
+        // named has to stop here, and stop before the archive is asked anything at all - it is not a
+        // failure, so it spends no attempt and leaves no reservation behind.
+        config(['converter.skip_profiles' => [65]]);
+        $conversion = $this->claimedConversion();
+
+        $this->pipeline()->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Cancelled, $conversion->status);
+        $this->assertSame(Stage::Skipped, $conversion->failure_stage);
+        $this->assertSame(0, $conversion->attempts);
+        $this->assertStringContainsString('profile 65 is not converted', (string) $conversion->failure_reason);
+
+        $this->assertNull($this->archive->ownerOf(self::CONTENT));
+        $this->assertSame([], $this->archive->failedContents());
+        $this->assertSame([], $this->archive->convertedContents());
+        $this->assertSame([], $this->archive->pages());
+        $this->assertSame([], $this->uploadedImages());
+    }
+
+    public function test_another_profile_is_converted_as_usual(): void
+    {
+        config(['converter.skip_profiles' => [12]]);
+        $conversion = $this->claimedConversion();
+
+        $this->pipeline()->convert($conversion);
+
+        $this->assertSame(ConversionStatus::Done, $conversion->refresh()->status);
+    }
+
     public function test_a_download_that_failed_for_another_reason_is_still_retried(): void
     {
         // A right that was taken away or a site mid-restore is not a stale row: calling those missing

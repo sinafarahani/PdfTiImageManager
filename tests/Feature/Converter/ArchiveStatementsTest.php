@@ -46,6 +46,57 @@ class ArchiveStatementsTest extends TestCase
         $this->assertSame([5000, 'application/pdf', '00000000-0000-0000-0000-000000000000'], $statement['bindings']);
     }
 
+    public function test_discover_leaves_out_the_profiles_that_are_not_converted(): void
+    {
+        // The alternative is to learn it one FTP connection at a time, per content, for a profile
+        // whose files are all gone. The IDs are in the statement rather than bound: config casts every
+        // one of them to an integer, and the two queries that use the clause bind positionally.
+        config(['converter.skip_profiles' => [65, 71]]);
+        $connection = new RecordingConnection;
+
+        (new SqlServerArchive($connection, 'on'))->discover(null, 5000);
+
+        $expected = <<<'SQL'
+            SELECT DISTINCT TOP (?) g.ID, g.ProcessDate, g.ProfileID
+            FROM GeneralContent g
+            INNER JOIN MVDContent cf ON g.ID = cf.ContentID
+            WHERE cf.Format = ?
+              AND cf.Deleted = 0
+              AND (g.FS3dIndexItemCountThresholdStatus = 0 OR g.FS3dIndexItemCountThresholdStatus IS NULL)
+              AND g.Reserved = ?
+              AND g.RenderMediaId <> 1
+              AND (g.ProfileID IS NULL OR g.ProfileID NOT IN (65, 71))
+            ORDER BY g.ProcessDate, g.ID
+            SQL;
+
+        $statement = $connection->onlyStatement();
+
+        $this->assertSame($expected, $statement['sql']);
+        $this->assertSame([5000, 'application/pdf', '00000000-0000-0000-0000-000000000000'], $statement['bindings']);
+    }
+
+    public function test_the_seed_leaves_out_the_profiles_that_are_not_converted_too(): void
+    {
+        config(['converter.skip_profiles' => [65]]);
+        $connection = new RecordingConnection;
+
+        (new SqlServerArchive($connection, 'on'))->seedFromLegacyQueue(500, 1000);
+
+        $expected = <<<'SQL'
+            SELECT ID, ProfileID, ProcessDate
+            FROM PdfConvert
+            WHERE state = 0
+              AND (ProfileID IS NULL OR ProfileID NOT IN (65))
+            ORDER BY ProcessDate, ID
+            OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+            SQL;
+
+        $statement = $connection->onlyStatement();
+
+        $this->assertSame($expected, $statement['sql']);
+        $this->assertSame([1000, 500], $statement['bindings']);
+    }
+
     public function test_discover_scans_forward_from_the_watermark(): void
     {
         $connection = new RecordingConnection;

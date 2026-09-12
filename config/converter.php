@@ -14,6 +14,27 @@ return [
     |
     */
 
+    /*
+     * Profiles that are not converted, as a comma-separated list of GeneralContent.ProfileID
+     * (CONVERTER_SKIP_PROFILES=65,71).
+     *
+     * A profile whose documents have been removed from the file store still has all of its contents
+     * in GeneralContent, each naming a PDF that is not there any more. Nothing in the database says
+     * so - the MVDContent rows are not flagged deleted - so the only way to find out is to ask the
+     * file store, and that costs a whole FTP session per content: connect, log in, fail to download,
+     * list the folder, ask for the folder itself. Hundreds of thousands of contents that way take
+     * days and convert nothing.
+     *
+     * Naming the profile here answers for all of them at once: discovery stops offering them, and the
+     * ones already queued are retired by converters:skip without a single FTP connection.
+     *
+     * @see \App\Console\Commands\SkipProfiles
+     */
+    'skip_profiles' => array_values(array_unique(array_filter(array_map(
+        static fn (string $profileId): int => (int) trim($profileId),
+        explode(',', (string) env('CONVERTER_SKIP_PROFILES', '')),
+    )))),
+
     'archive' => [
 
         // The database connection of the archive (config/database.php).

@@ -57,7 +57,7 @@
         @enderror
     </div>
 
-    <dl class="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-5">
+    <dl class="mt-6 grid grid-cols-2 gap-4 {{ $counts['skipped'] > 0 ? 'sm:grid-cols-6' : 'sm:grid-cols-5' }}">
         <div class="rounded-xl bg-gray-50 px-4 py-3">
             <dt class="text-xs font-medium text-gray-500">{{ __('Waiting') }}</dt>
             <dd class="text-lg font-semibold text-gray-900">{{ number_format($counts['waiting']) }}</dd>
@@ -75,6 +75,14 @@
             <dt class="text-xs font-medium text-gray-500">{{ __('No source file') }}</dt>
             <dd class="text-lg font-semibold text-gray-700">{{ number_format($counts['missing']) }}</dd>
         </div>
+        @if ($counts['skipped'] > 0)
+            <div class="rounded-xl bg-gray-50 px-4 py-3">
+                {{-- Contents of a profile nobody converts any more: shown so that a queue that drops by
+                     a few hundred thousand says where they went. --}}
+                <dt class="text-xs font-medium text-gray-500">{{ __('Not converted') }}</dt>
+                <dd class="text-lg font-semibold text-gray-700">{{ number_format($counts['skipped']) }}</dd>
+            </div>
+        @endif
         <div class="rounded-xl bg-gray-50 px-4 py-3">
             <dt class="text-xs font-medium text-gray-500">{{ __('Failed') }}</dt>
             <dd class="text-lg font-semibold {{ $counts['failed'] > 0 ? 'text-red-700' : 'text-gray-900' }}">{{ number_format($counts['failed']) }}</dd>

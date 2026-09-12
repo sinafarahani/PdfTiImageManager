@@ -106,6 +106,8 @@ class SqlServerArchive implements ArchiveGateway
               AND g.RenderMediaId <> 1
             SQL;
 
+        $sql .= $this->exceptSkippedProfiles('g.ProfileID');
+
         if ($processedAfter !== null) {
             $sql .= "\n  AND g.ProcessDate > ?";
             $bindings[] = $processedAfter->format('Y-m-d H:i:s');
@@ -144,6 +146,12 @@ class SqlServerArchive implements ArchiveGateway
             SELECT ID, ProfileID, ProcessDate
             FROM PdfConvert
             WHERE state = 0
+            SQL;
+
+        $sql .= $this->exceptSkippedProfiles('ProfileID');
+
+        $sql .= <<<'SQL'
+
             ORDER BY ProcessDate, ID
             OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
             SQL;
@@ -623,6 +631,27 @@ class SqlServerArchive implements ArchiveGateway
             ),
             $this->connection->select($sql, $bindings),
         );
+    }
+
+    /**
+     * The clause that keeps the profiles named in converter.skip_profiles out of a discovery query,
+     * or nothing at all when none are named.
+     *
+     * The IDs go into the statement rather than into bindings because the two queries that use this
+     * build their bindings positionally and this clause sits in the middle of one and at the front of
+     * the other. They are integers by the time they arrive - config casts every entry with (int) -
+     * so there is nothing here a string could carry through.
+     */
+    private function exceptSkippedProfiles(string $column): string
+    {
+        $profiles = array_map('intval', (array) config('converter.skip_profiles'));
+
+        if ($profiles === []) {
+            return '';
+        }
+
+        // A content with no profile at all is still converted: only the named ones are left out.
+        return "\n  AND ({$column} IS NULL OR {$column} NOT IN (".implode(', ', $profiles).'))';
     }
 
     private static function text(mixed $value): string

@@ -23,7 +23,7 @@ class ConversionOverview
      * index per poll, which is fine at this size and would not be at ten times it - if this table is
      * ever kept for years rather than pruned, the four numbers belong in a counters row.
      *
-     * @return array{waiting: int, converting: int, done: int, missing: int, failed: int, converted_today: int}
+     * @return array{waiting: int, converting: int, done: int, missing: int, skipped: int, failed: int, converted_today: int}
      */
     public function counts(): array
     {
@@ -48,6 +48,11 @@ class ConversionOverview
             'converting' => (int) $byStatus->get(ConversionStatus::Claimed->value, 0),
             'done' => (int) $byStatus->get(ConversionStatus::Done->value, 0),
             'missing' => $missing,
+
+            // Contents of a profile that is not converted. They are their own status rather than a
+            // failure, so they are already outside every other number here; the tile exists so that a
+            // queue that suddenly drops by a few hundred thousand says where they went.
+            'skipped' => (int) $byStatus->get(ConversionStatus::Cancelled->value, 0),
             'failed' => (int) $byStatus->get(ConversionStatus::Failed->value, 0) - $missing,
             'converted_today' => Conversion::query()
                 ->where('status', ConversionStatus::Done)

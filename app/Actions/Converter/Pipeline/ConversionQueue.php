@@ -213,6 +213,25 @@ class ConversionQueue
      * refused rather than written for the same reason heartbeat() is: the content may already be in
      * somebody else's hands, and pulling it back to pending would hand it out twice.
      */
+    /**
+     * Finishes a content without converting it and without spending an attempt: it is not work that
+     * went wrong, it is work that was never wanted. Cancelled is its own status precisely so that
+     * these never land among the failures a person is meant to read.
+     */
+    public function cancel(Conversion $conversion, Stage $stage, string $reason): bool
+    {
+        return $this->writeWhileHeld($conversion, [
+            'status' => ConversionStatus::Cancelled->value,
+            'failure_stage' => $stage->value,
+            'failure_reason' => $reason,
+            'worker' => null,
+            'claimed_at' => null,
+            'heartbeat_at' => null,
+            'finished_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
     public function fail(Conversion $conversion, Stage $stage, string $reason, bool $retryable): bool
     {
         return $this->connection()->transaction(function () use ($conversion, $stage, $reason, $retryable): bool {

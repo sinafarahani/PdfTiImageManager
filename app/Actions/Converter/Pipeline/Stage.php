@@ -17,6 +17,13 @@ enum Stage: string
      * apart from a download that failed is what lets the two be counted - and retried - separately.
      */
     case Missing = 'missing';
+
+    /**
+     * The content belongs to a profile named in converter.skip_profiles, so it is not converted at
+     * all. Not a failure and never retried: the content is finished the moment it is recognised, and
+     * nothing in the archive or on the file store is touched.
+     */
+    case Skipped = 'skipped';
     case Download = 'download';
     case Render = 'render';
     case Thumbnail = 'thumbnail';
@@ -31,6 +38,7 @@ enum Stage: string
             self::Reserve => 'taking the content',
             self::Metadata => 'reading the content in the archive',
             self::Missing => 'the source PDF is not on the file store',
+            self::Skipped => 'the profile is not converted',
             self::Download => 'downloading the PDF',
             self::Render => 'rendering the pages',
             self::Thumbnail => 'making thumbnails',

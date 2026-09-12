@@ -64,6 +64,20 @@ class ConvertOneContent
                 return;
             }
 
+            // Before the archive is asked anything at all: a content of a profile that is not
+            // converted is finished here, having cost one row update and no connection to anywhere.
+            // The bulk of these never reach a worker - converters:skip retires them in the queue -
+            // but one that was queued before the profile was named still has to stop here.
+            if ($this->profileIsNotConverted($conversion)) {
+                $this->queue->cancel(
+                    $conversion,
+                    Stage::Skipped,
+                    "profile {$conversion->profile_id} is not converted (CONVERTER_SKIP_PROFILES)",
+                );
+
+                return;
+            }
+
             if (! $this->archive->reserve($contentId, $owner)) {
                 // Somebody else has it. We hold nothing in the archive, so nothing is released here.
                 $this->queue->fail($conversion, Stage::Reserve, 'the archive has this content reserved by another worker', retryable: true);
@@ -337,6 +351,15 @@ class ConvertOneContent
      * Records the failure and hands the content back to the archive: free again when it will be
      * tried once more, marked failed when the failure was a verdict about the document itself.
      */
+    /**
+     * Whether this content's profile is one of those the panel is configured not to convert.
+     */
+    private function profileIsNotConverted(Conversion $conversion): bool
+    {
+        return $conversion->profile_id !== null
+            && in_array((int) $conversion->profile_id, (array) config('converter.skip_profiles'), true);
+    }
+
     private function giveUp(Conversion $conversion, Stage $stage, string $reason, bool $retryable): void
     {
         if (! $this->queue->fail($conversion, $stage, $reason, $retryable)) {
