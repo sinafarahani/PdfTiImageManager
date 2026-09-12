@@ -3,27 +3,25 @@
 namespace App\Livewire;
 
 use App\Actions\Converter\ConverterStatus;
-use App\Actions\Converter\StartConverters;
-use App\Actions\Converter\StopConverters;
-use App\Actions\Converter\WorkerProcesses;
+use App\Actions\Converter\Pipeline\ConversionOverview;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Attributes\Locked;
 use Livewire\Attributes\Validate;
 use Livewire\Component;
-use RuntimeException;
 
 class Action extends Component
 {
     /**
-     * One of the ConverterStatus states: stopped or running. It decides between the Start and the Stop button.
+     * One of the ConverterStatus states: stopped or running. It decides between the Start and the
+     * Stop button, and whether the dispatcher hands out new contents.
      */
     #[Locked]
     public string $status = ConverterStatus::STOPPED;
 
     /**
-     * Number of processes of the current (or last) run.
+     * Contents converted at the same time, as set by the last Start.
      */
     #[Locked]
     public int $runningThreads = 0;
@@ -35,42 +33,37 @@ class Action extends Component
     public int $version = 0;
 
     /**
-     * Workers whose process is running and that were not asked to finish.
+     * Live counts from the conversions table.
+     *
+     * @var array{waiting: int, converting: int, done: int, failed: int, converted_today: int}
      */
     #[Locked]
-    public int $startedWorkers = 0;
+    public array $counts = ['waiting' => 0, 'converting' => 0, 'done' => 0, 'failed' => 0, 'converted_today' => 0];
 
     /**
-     * Workers whose process is still running after a Stop (finishing their current file).
-     */
-    #[Locked]
-    public int $stoppingWorkers = 0;
-
-    /**
-     * Number of processes to start (the input field).
+     * Number of contents to convert at the same time (the input field).
      */
     #[Validate('required|integer|min:1|max:64', onUpdate: false)]
     public $threads = 4;
 
-    public function mount(ConverterStatus $converterStatus, WorkerProcesses $workerProcesses): void
+    public function mount(ConverterStatus $converterStatus, ConversionOverview $overview): void
     {
         $this->showState($converterStatus->current());
-        $this->showWorkers($workerProcesses->overview());
+        $this->counts = $overview->counts();
     }
 
     /**
-     * Polled every few seconds. Shows a start or stop made in another browser and workers that have started or
-     * stopped, and otherwise leaves the page alone. A process count that is being typed is never reset.
+     * Polled every few seconds. Shows a start or stop made in another browser and the conversions
+     * that finished meanwhile, and otherwise leaves the page alone. A number being typed is never
+     * reset, because the input is only overwritten when the shared state itself changed.
      */
-    public function syncState(ConverterStatus $converterStatus, WorkerProcesses $workerProcesses): void
+    public function syncState(ConverterStatus $converterStatus, ConversionOverview $overview): void
     {
         $state = $converterStatus->current();
-        $overview = $workerProcesses->overview();
+        $counts = $overview->counts();
         $stateChanged = $state['version'] !== $this->version || $state['status'] !== $this->status;
-        $workersChanged = count($overview['started']) !== $this->startedWorkers
-            || count($overview['stopping']) !== $this->stoppingWorkers;
 
-        if (! $stateChanged && ! $workersChanged) {
+        if (! $stateChanged && $counts === $this->counts) {
             $this->skipRender();
 
             return;
@@ -81,41 +74,43 @@ class Action extends Component
             $this->showState($state);
         }
 
-        $this->showWorkers($overview);
+        $this->counts = $counts;
     }
 
-    public function start(StartConverters $startConverters, ConverterStatus $converterStatus, WorkerProcesses $workerProcesses): void
+    /**
+     * Start converting. Nothing is copied, renamed or launched: the dispatcher is simply allowed to
+     * hand contents to the workers again, so this is instant.
+     */
+    public function start(ConverterStatus $converterStatus): void
     {
         Gate::authorize('start-action');
         $this->validate();
 
         try {
-            $started = $startConverters->start((int) $this->threads);
+            $converterStatus->lock()->block(10, function () use ($converterStatus): void {
+                $converterStatus->set(ConverterStatus::RUNNING, (int) $this->threads);
+            });
         } catch (LockTimeoutException) {
             $this->addError('threads', __('Another start or stop is in progress. Try again in a moment.'));
-
-            return;
-        } catch (RuntimeException $exception) {
-            report($exception);
-            $this->addError('threads', $exception->getMessage());
 
             return;
         }
 
         $this->showState($converterStatus->current());
-        $this->showWorkers($workerProcesses->overview());
-
-        if (! $started) {
-            $this->addError('threads', __('The converters are already running.'));
-        }
     }
 
-    public function stop(StopConverters $stopConverters, ConverterStatus $converterStatus, WorkerProcesses $workerProcesses): void
+    /**
+     * Stop converting: no content is taken on from now, and the ones being converted finish
+     * normally. Nothing is ever interrupted, so Start can be pressed again straight away.
+     */
+    public function stop(ConverterStatus $converterStatus): void
     {
         Gate::authorize('start-action');
 
         try {
-            $stopConverters->stop();
+            $converterStatus->lock()->block(10, function () use ($converterStatus): void {
+                $converterStatus->set(ConverterStatus::STOPPED);
+            });
         } catch (LockTimeoutException) {
             $this->addError('threads', __('Another start or stop is in progress. Try again in a moment.'));
 
@@ -123,7 +118,6 @@ class Action extends Component
         }
 
         $this->showState($converterStatus->current());
-        $this->showWorkers($workerProcesses->overview());
     }
 
     public function render(): View
@@ -140,14 +134,5 @@ class Action extends Component
         $this->runningThreads = $state['threads'];
         $this->threads = $state['threads'];
         $this->version = $state['version'];
-    }
-
-    /**
-     * @param  array{started: list<int>, stopping: list<int>}  $overview
-     */
-    private function showWorkers(array $overview): void
-    {
-        $this->startedWorkers = count($overview['started']);
-        $this->stoppingWorkers = count($overview['stopping']);
     }
 }

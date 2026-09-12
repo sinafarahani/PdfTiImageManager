@@ -1,0 +1,155 @@
+<?php
+
+namespace Tests\Feature\Converter;
+
+use App\Actions\Converter\Archive\ArchiveGateway;
+use App\Actions\Converter\Archive\DiscoveredContent;
+use App\Actions\Converter\Archive\FakeArchive;
+use App\Actions\Converter\Archive\PageInsert;
+use App\Actions\Converter\Pipeline\ConversionQueue;
+use App\Actions\Converter\Pipeline\ConversionStatus;
+use App\Console\Commands\ReconcileConversions;
+use App\Models\Conversion;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+/**
+ * What used to be done by hand when a worker died mid-content: find the page rows that attempt had
+ * written, delete them, free the content in the archive and start it again. The ledger makes it exact,
+ * and these tests hold it to that - a half-converted content must be left as if it had never started.
+ */
+class ReconcileConversionsTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private FakeArchive $archive;
+
+    private ConversionQueue $queue;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->archive = new FakeArchive;
+        $this->app->instance(ArchiveGateway::class, $this->archive);
+        $this->queue = new ConversionQueue;
+
+        config([
+            'converter.failure.stale_after_minutes' => 60,
+            'converter.failure.max_attempts' => 3,
+        ]);
+    }
+
+    public function test_a_stale_conversion_is_cleaned_up_released_and_queued_again(): void
+    {
+        [$conversion, $uploadedPath] = $this->interruptedConversion();
+
+        $this->artisan('converters:reconcile')
+            ->expectsOutputToContain($uploadedPath)
+            ->expectsOutputToContain('Reclaimed 1 conversion(s)')
+            ->assertSuccessful();
+
+        $conversion->refresh();
+
+        $this->assertSame(ConversionStatus::Pending, $conversion->status);
+        $this->assertSame(1, $conversion->attempts);
+        $this->assertNull($conversion->worker);
+        $this->assertNull($conversion->heartbeat_at);
+
+        // Nothing of the interrupted attempt is left: no page rows in the archive, no ledger rows
+        // here, and the content belongs to nobody again.
+        $this->assertSame([], $this->archive->pages());
+        $this->assertSame(0, $conversion->pages()->count());
+        $this->assertNull($this->archive->ownerOf('C1'));
+        $this->assertCount(0, $this->queue->stale());
+    }
+
+    public function test_reclaiming_hands_the_uploaded_images_to_the_caller(): void
+    {
+        [$conversion, $uploadedPath] = $this->interruptedConversion();
+
+        $orphans = $this->app->make(ReconcileConversions::class)
+            ->reclaim($conversion, $this->archive, $this->queue);
+
+        // Only the page that really reached the FTP site: deleting a file the pipeline never wrote
+        // would be a guess, which is the thing this ledger exists to avoid.
+        $this->assertSame([$uploadedPath], $orphans);
+    }
+
+    public function test_a_conversion_it_does_not_hold_is_left_completely_alone(): void
+    {
+        [$conversion] = $this->interruptedConversion();
+
+        $command = $this->app->make(ReconcileConversions::class);
+
+        $this->assertNotNull($command->reclaim($conversion, $this->archive, $this->queue));
+
+        // A second reconciler - or the same one running twice because nothing stopped it - arrives
+        // with a model that still looks claimed. By now a new attempt may already be writing pages for
+        // this content, and deleting those is the one mistake the ledger exists to prevent.
+        $this->queue->recordPage($conversion, 1, 'NEW-ATTEMPT-PAGE');
+
+        $this->assertNull($command->reclaim($conversion, $this->archive, $this->queue));
+        $this->assertSame(1, $conversion->pages()->count());
+        $this->assertSame(1, Conversion::query()->sole()->attempts);
+    }
+
+    public function test_a_content_that_has_used_up_its_attempts_stays_failed(): void
+    {
+        [$conversion] = $this->interruptedConversion();
+
+        $conversion->forceFill(['attempts' => 2])->save();
+
+        $this->artisan('converters:reconcile')->assertSuccessful();
+
+        $conversion->refresh();
+
+        $this->assertSame(ConversionStatus::Failed, $conversion->status);
+        $this->assertSame(3, $conversion->attempts);
+        $this->assertSame([], $this->archive->pages());
+        $this->assertNull($this->archive->ownerOf('C1'));
+    }
+
+    public function test_conversions_whose_worker_is_still_reporting_are_left_alone(): void
+    {
+        $this->interruptedConversion();
+
+        Conversion::query()->update(['heartbeat_at' => now()]);
+
+        $this->artisan('converters:reconcile')
+            ->expectsOutputToContain('Reclaimed 0 conversion(s)')
+            ->assertSuccessful();
+
+        $this->assertCount(2, $this->archive->pages());
+        $this->assertSame('worker-1', $this->archive->ownerOf('C1'));
+        $this->assertSame(ConversionStatus::Claimed, Conversion::query()->sole()->status);
+    }
+
+    /**
+     * A content a worker took, wrote two page rows for and uploaded the first image of, before it
+     * stopped reporting.
+     *
+     * @return array{Conversion, string}
+     */
+    private function interruptedConversion(): array
+    {
+        $this->archive->addContent('C1');
+        $this->archive->reserve('C1', 'worker-1');
+
+        $this->queue->add([new DiscoveredContent('C1', 1, null)]);
+
+        $conversion = $this->queue->claim('worker-1', 1)->sole();
+
+        $first = $this->archive->insertPage(new PageInsert('C1', 1, '2025-01-07 16:39:53', 'Image/jpg', 1, 'thumb-1'));
+        $second = $this->archive->insertPage(new PageInsert('C1', 2, '2025-01-07 16:39:53', 'Image/jpg', 1, 'thumb-2'));
+
+        $uploadedPath = '/DOI/2025/01/07/16/39/53/'.$first.'.jpg';
+
+        $this->queue->markPageUploaded($this->queue->recordPage($conversion, 1, $first), $uploadedPath, 91_204);
+        $this->queue->recordPage($conversion, 2, $second);
+
+        $conversion->forceFill(['heartbeat_at' => now()->subMinutes(90)])->save();
+
+        return [$conversion, $uploadedPath];
+    }
+}

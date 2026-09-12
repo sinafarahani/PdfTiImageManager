@@ -124,22 +124,8 @@ return [
     ],
 
     /*
-    |--------------------------------------------------------------------------
-    | PDF to image converters
-    |--------------------------------------------------------------------------
-    |
-    | pdfToImg: folder that holds one folder per worker (0, 1, 2, ...); folder 0 is the template for the others.
-    | runnerPath: the runner executable started for each worker. maxSize: space (GB) shared by the workers.
-    | shareRoot: drive or folder of the workers' share folders (<shareRoot>\<n>\). forceStopAfterMinutes: a worker
-    | still running this long after Stop is frozen and is ended by force (a working one finishes within a minute).
-    |
+    | The conversion pipeline has its own settings in config/converter.php.
     */
-
-    'pdfToImg' => env('PDF_TO_IMG_DIR', ''),
-    'runnerPath' => env('RUNNER_DIR', ''),
-    'maxSize' => env('MAX_AVAILABLE_SPACE', '200'),
-    'shareRoot' => env('SHARE_ROOT', 'f:'),
-    'forceStopAfterMinutes' => (int) env('FORCE_STOP_AFTER_MINUTES', 10),
 
     /*
     | Administrator created by `php artisan db:seed` (a random password is printed when ADMIN_PASSWORD is empty).

@@ -113,6 +113,30 @@ return [
             // 'trust_server_certificate' => env('DB_TRUST_SERVER_CERTIFICATE', 'false'),
         ],
 
+        /*
+         * The archive (Papyrus) on SQL Server: the converter reads the contents to convert from here
+         * and writes their page rows back. It is reached over the internal network with ODBC Driver
+         * 17, so encryption is off and the certificate is trusted; both values must be strings, as a
+         * PHP false would reach the connection string as an empty value. Bindings are masked in
+         * exception messages because a page thumbnail would otherwise end up in the log.
+         */
+        'archive' => [
+            'driver' => 'sqlsrv',
+            'host' => env('ARCHIVE_DB_HOST', ''),
+            'port' => env('ARCHIVE_DB_PORT', '1433'),
+            'database' => env('ARCHIVE_DB_DATABASE', ''),
+            'username' => env('ARCHIVE_DB_USERNAME', ''),
+            'password' => env('ARCHIVE_DB_PASSWORD', ''),
+            'charset' => env('ARCHIVE_DB_CHARSET', 'utf8'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'encrypt' => env('ARCHIVE_DB_ENCRYPT', 'no'),
+            'trust_server_certificate' => env('ARCHIVE_DB_TRUST_CERTIFICATE', 'true'),
+            'appname' => 'PdfToImgManager',
+            'login_timeout' => (int) env('ARCHIVE_DB_LOGIN_TIMEOUT', 5),
+            'mask_bindings_in_exception_messages' => true,
+        ],
+
     ],
 
     /*
