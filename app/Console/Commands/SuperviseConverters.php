@@ -54,6 +54,13 @@ class SuperviseConverters extends Command
      */
     private const int RESTART_BACKOFF_SECONDS = 5;
 
+    /**
+     * How quiet a conversion has to have been, at startup, to count as abandoned. Long enough that a
+     * worker orphaned by a crashed supervisor - which keeps reporting - is left alone, short enough
+     * that a machine coming back from a reboot picks its work up again at once.
+     */
+    private const int RESTART_GRACE_MINUTES = 2;
+
     public function handle(ConverterStatus $status): int
     {
         $me = $this->supervisorName();
@@ -78,6 +85,7 @@ class SuperviseConverters extends Command
         $workers = [];
 
         $this->info('Supervisor started. Start and Stop are controlled from the panel.');
+        $this->reclaimWhatThisMachineWasConverting();
 
         try {
             while ($passes === 0 || $pass < $passes) {
@@ -244,6 +252,29 @@ class SuperviseConverters extends Command
     private function supervisorName(): string
     {
         return sprintf('supervisor@%s:%d', gethostname() ?: 'unknown', getmypid() ?: 0);
+    }
+
+    /**
+     * Puts back whatever was being converted when this machine last stopped.
+     *
+     * Holding the supervisor role means no pool of ours is running, so a conversion that has not
+     * reported for a couple of minutes has nobody working on it - after a reboot, that is everything
+     * that was in flight. Without this they would sit claimed for the full staleness window, which is
+     * an hour and a half of a machine that has just come back doing nothing about them.
+     *
+     * A short window rather than none: a supervisor that crashed and was restarted may have left its
+     * workers running, and those keep reporting. Their conversions are theirs, and are left alone.
+     */
+    private function reclaimWhatThisMachineWasConverting(): void
+    {
+        try {
+            $this->callSilently('converters:reconcile', ['--minutes' => self::RESTART_GRACE_MINUTES]);
+        } catch (Throwable $exception) {
+            // Never a reason not to start: the scheduled reconciler reaches the same conversions on its
+            // own, only later.
+            report($exception);
+            $this->warn('Could not put back what was interrupted: '.$exception->getMessage());
+        }
     }
 
     /**

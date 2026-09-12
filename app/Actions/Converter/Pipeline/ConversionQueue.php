@@ -5,6 +5,7 @@ namespace App\Actions\Converter\Pipeline;
 use App\Actions\Converter\Archive\DiscoveredContent;
 use App\Models\Conversion;
 use App\Models\ConversionPage;
+use Carbon\CarbonInterface;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
@@ -330,9 +331,9 @@ class ConversionQueue
      *
      * @return Collection<int, Conversion>
      */
-    public function stale(?int $limit = null): Collection
+    public function stale(?int $limit = null, ?CarbonInterface $before = null): Collection
     {
-        $query = Conversion::query()->stale()->orderBy('id');
+        $query = Conversion::query()->stale($before)->orderBy('id');
 
         if ($limit !== null) {
             $query->limit($limit);

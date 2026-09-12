@@ -2,7 +2,13 @@
 
 namespace Tests\Feature\Converter;
 
+use App\Actions\Converter\Archive\ArchiveGateway;
+use App\Actions\Converter\Archive\DiscoveredContent;
+use App\Actions\Converter\Archive\FakeArchive;
 use App\Actions\Converter\ConverterStatus;
+use App\Actions\Converter\Ftp\FileStore;
+use App\Actions\Converter\Ftp\LocalFileStore;
+use App\Actions\Converter\Pipeline\ConversionQueue;
 use App\Actions\Converter\Pipeline\ConversionStatus;
 use App\Models\Conversion;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -71,6 +77,27 @@ class SuperviseConvertersTest extends TestCase
         $this->artisan('converters:supervise', ['--passes' => 1])->assertSuccessful();
 
         Process::assertRanTimes($this->ran('queue:work'), 2);
+    }
+
+    public function test_it_takes_back_what_the_machine_was_converting_when_it_stopped(): void
+    {
+        // A reboot kills every worker, and their contents stay claimed with nobody working on them.
+        // Holding the supervisor role means no pool of ours is running, so they are put back at once
+        // instead of waiting out the staleness window - an hour and a half of a machine doing nothing.
+        $archive = new FakeArchive;
+        $archive->addContent('C1')->reserve('C1', 'worker-1');
+        $this->app->instance(ArchiveGateway::class, $archive);
+        $this->app->instance(FileStore::class, new LocalFileStore(sys_get_temp_dir()));
+
+        $queue = new ConversionQueue;
+        $queue->add([new DiscoveredContent('C1', 1, null)]);
+        $interrupted = $queue->claim('worker-1', 1)->sole();
+        $interrupted->forceFill(['heartbeat_at' => now()->subMinutes(30)])->save();
+
+        $this->artisan('converters:supervise', ['--passes' => 1])->assertSuccessful();
+
+        $this->assertSame(ConversionStatus::Pending, $interrupted->refresh()->status);
+        $this->assertNull($archive->ownerOf('C1'));
     }
 
     public function test_a_second_supervisor_refuses_rather_than_running_a_second_pool(): void

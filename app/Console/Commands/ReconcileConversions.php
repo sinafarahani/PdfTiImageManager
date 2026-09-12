@@ -3,6 +3,8 @@
 namespace App\Console\Commands;
 
 use App\Actions\Converter\Archive\ArchiveGateway;
+use App\Actions\Converter\Ftp\FileStore;
+use App\Actions\Converter\Ftp\FileStoreException;
 use App\Actions\Converter\Pipeline\ConversionQueue;
 use App\Actions\Converter\Pipeline\Stage;
 use App\Models\Conversion;
@@ -43,7 +45,9 @@ class ReconcileConversions extends Command
     /**
      * @var string
      */
-    protected $signature = 'converters:reconcile {--limit=200 : Stale conversions to reclaim in this run}';
+    protected $signature = 'converters:reconcile
+        {--limit=200 : Stale conversions to reclaim in this run}
+        {--minutes= : Treat a conversion as stale after this many minutes instead of the configured window}';
 
     /**
      * @var string
@@ -64,7 +68,14 @@ class ReconcileConversions extends Command
         $orphans = [];
         $stopped = false;
 
-        foreach ($queue->stale($limit) as $conversion) {
+        // The window is normally the configured one, which has to be longer than the longest step a
+        // healthy conversion runs without reporting. The supervisor overrides it at startup, where
+        // nothing of ours can be running yet and a machine that has just booted would otherwise leave
+        // whatever it was converting sitting claimed for an hour and a half.
+        $minutes = $this->option('minutes');
+        $before = $minutes === null ? null : now()->subMinutes(max(0, (int) $minutes));
+
+        foreach ($queue->stale($limit, $before) as $conversion) {
             $this->warn(sprintf(
                 'Reclaiming %s from worker %s (last heartbeat %s).',
                 $conversion->content_id,
@@ -105,13 +116,15 @@ class ReconcileConversions extends Command
 
             foreach ($paths as $path) {
                 $orphans[] = $path;
-                $this->line('  image left on FTP: '.$path);
             }
         }
 
+        $deleted = $this->deleteOrphans($orphans);
+
         $this->info(sprintf(
-            'Reclaimed %d conversion(s); %d uploaded image(s) to delete.',
+            'Reclaimed %d conversion(s); deleted %d of %d image(s) the interrupted attempts had uploaded.',
             $reclaimed,
+            $deleted,
             count($orphans),
         ));
 
@@ -147,6 +160,46 @@ class ReconcileConversions extends Command
      *
      * @return list<string>|null
      */
+    /**
+     * Removes the images an interrupted attempt had already uploaded, and returns how many went.
+     *
+     * Its page rows have just been deleted, so nothing in the archive points at these files any more
+     * and the next attempt uploads its own under new ids: left alone they are dead weight on the share
+     * drive that nothing would ever find again. A store that cannot be reached is reported and not
+     * retried here - the paths are in conversion_pages until the row is replaced, and the sweep is not
+     * worth failing a reclaim over.
+     *
+     * @param  list<string>  $paths
+     */
+    private function deleteOrphans(array $paths): int
+    {
+        if ($paths === []) {
+            return 0;
+        }
+
+        try {
+            $files = app(FileStore::class);
+        } catch (Throwable $exception) {
+            report($exception);
+            $this->warn(sprintf('  %d uploaded image(s) could not be deleted: the file store is not reachable.', count($paths)));
+
+            return 0;
+        }
+
+        $deleted = 0;
+
+        foreach ($paths as $path) {
+            try {
+                $files->delete($path);
+                $deleted++;
+            } catch (FileStoreException $exception) {
+                $this->line("  image left on the file store: {$path} ({$exception->getMessage()})");
+            }
+        }
+
+        return $deleted;
+    }
+
     public function reclaim(Conversion $conversion, ArchiveGateway $archive, ConversionQueue $queue): ?array
     {
         $stoppedWorker = $conversion->worker ?? 'unknown';

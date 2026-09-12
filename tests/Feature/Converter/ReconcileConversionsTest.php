@@ -6,11 +6,14 @@ use App\Actions\Converter\Archive\ArchiveGateway;
 use App\Actions\Converter\Archive\DiscoveredContent;
 use App\Actions\Converter\Archive\FakeArchive;
 use App\Actions\Converter\Archive\PageInsert;
+use App\Actions\Converter\Ftp\FileStore;
+use App\Actions\Converter\Ftp\LocalFileStore;
 use App\Actions\Converter\Pipeline\ConversionQueue;
 use App\Actions\Converter\Pipeline\ConversionStatus;
 use App\Console\Commands\ReconcileConversions;
 use App\Models\Conversion;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\File;
 use Tests\TestCase;
 
 /**
@@ -24,6 +27,8 @@ class ReconcileConversionsTest extends TestCase
 
     private FakeArchive $archive;
 
+    private string $store;
+
     private ConversionQueue $queue;
 
     protected function setUp(): void
@@ -34,10 +39,52 @@ class ReconcileConversionsTest extends TestCase
         $this->app->instance(ArchiveGateway::class, $this->archive);
         $this->queue = new ConversionQueue;
 
+        // A store of its own, because reclaiming deletes the images the interrupted attempt uploaded.
+        // Without this the command resolves the real FTP client and spends the test's time failing to
+        // reach a server that is not there.
+        $this->store = sys_get_temp_dir().DIRECTORY_SEPARATOR.'pdf2img-reconcile-'.uniqid();
+        File::ensureDirectoryExists($this->store);
+        $this->app->instance(FileStore::class, new LocalFileStore($this->store));
+
         config([
             'converter.failure.stale_after_minutes' => 60,
             'converter.failure.max_attempts' => 3,
         ]);
+    }
+
+    protected function tearDown(): void
+    {
+        File::deleteDirectory($this->store);
+
+        parent::tearDown();
+    }
+
+    public function test_a_machine_that_has_just_started_takes_its_own_work_back_at_once(): void
+    {
+        // After a reboot nothing of ours is running, so waiting out the full staleness window would
+        // leave the machine idle for an hour and a half over work it could resume immediately. The
+        // supervisor asks for a short window at startup; a worker orphaned by a crash keeps reporting
+        // and is still left alone.
+        [$conversion] = $this->interruptedConversion();
+        $conversion->forceFill(['heartbeat_at' => now()->subMinutes(5)])->save();
+
+        $this->artisan('converters:reconcile', ['--minutes' => 2])
+            ->expectsOutputToContain('Reclaimed 1 conversion(s)')
+            ->assertSuccessful();
+
+        $this->assertSame(ConversionStatus::Pending, $conversion->refresh()->status);
+    }
+
+    public function test_a_short_window_still_leaves_a_worker_that_is_reporting_alone(): void
+    {
+        [$conversion] = $this->interruptedConversion();
+        $conversion->forceFill(['heartbeat_at' => now()->subSeconds(30)])->save();
+
+        $this->artisan('converters:reconcile', ['--minutes' => 2])
+            ->expectsOutputToContain('Reclaimed 0 conversion(s)')
+            ->assertSuccessful();
+
+        $this->assertSame(ConversionStatus::Claimed, $conversion->refresh()->status);
     }
 
     public function test_a_stale_conversion_is_cleaned_up_released_and_queued_again(): void
@@ -45,9 +92,12 @@ class ReconcileConversionsTest extends TestCase
         [$conversion, $uploadedPath] = $this->interruptedConversion();
 
         $this->artisan('converters:reconcile')
-            ->expectsOutputToContain($uploadedPath)
-            ->expectsOutputToContain('Reclaimed 1 conversion(s)')
+            ->expectsOutputToContain('Reclaimed 1 conversion(s); deleted 1 of 1 image(s)')
             ->assertSuccessful();
+
+        // The image the interrupted attempt had uploaded goes with its row: nothing in the archive
+        // points at it any more, and the next attempt uploads its own under a new id.
+        $this->assertFileDoesNotExist($this->localPathOf($uploadedPath));
 
         $conversion->refresh();
 
@@ -148,8 +198,17 @@ class ReconcileConversionsTest extends TestCase
         $this->queue->markPageUploaded($this->queue->recordPage($conversion, 1, $first), $uploadedPath, 91_204);
         $this->queue->recordPage($conversion, 2, $second);
 
+        // The image really is on the store, so reclaiming has something to take back off it.
+        File::ensureDirectoryExists(dirname($this->localPathOf($uploadedPath)));
+        File::put($this->localPathOf($uploadedPath), 'a page image');
+
         $conversion->forceFill(['heartbeat_at' => now()->subMinutes(90)])->save();
 
         return [$conversion, $uploadedPath];
+    }
+
+    private function localPathOf(string $remotePath): string
+    {
+        return $this->store.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, ltrim($remotePath, '/'));
     }
 }
