@@ -46,6 +46,9 @@ class FakeArchive implements ArchiveGateway
     /** @var list<string> contents taken back to "not converted" */
     private array $undone = [];
 
+    /** @var list<string> contents whose reservation was freed */
+    private array $freed = [];
+
     /** @var array<int, StoreMode> */
     private array $storeModes = [];
 
@@ -150,6 +153,14 @@ class FakeArchive implements ArchiveGateway
     public function undoneContents(): array
     {
         return $this->undone;
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function freedContents(): array
+    {
+        return $this->freed;
     }
 
     /**
@@ -308,6 +319,25 @@ class FakeArchive implements ArchiveGateway
         $this->failed = array_values(array_diff($this->failed, [$contentId]));
         unset($this->reservations[$contentId]);
         $this->undone[] = $contentId;
+    }
+
+    public function freeReservation(array $contentIds): int
+    {
+        $freed = 0;
+
+        foreach ($contentIds as $contentId) {
+            // The real one refuses a content the archive calls converted, or one that has page images.
+            if (in_array($contentId, $this->converted, true) || $this->imagePagesFor($contentId) !== []) {
+                continue;
+            }
+
+            $this->failed = array_values(array_diff($this->failed, [$contentId]));
+            unset($this->reservations[$contentId]);
+            $this->freed[] = $contentId;
+            $freed++;
+        }
+
+        return $freed;
     }
 
     public function markConverted(string $contentId): void

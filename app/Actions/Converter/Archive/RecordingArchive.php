@@ -188,6 +188,13 @@ class RecordingArchive implements ArchiveGateway
         $this->record('deletePages', ['mvdIds' => array_values($mvdIds), 'pages' => count($mvdIds)]);
     }
 
+    public function freeReservation(array $contentIds): int
+    {
+        $this->record('freeReservation', ['contentIds' => $contentIds]);
+
+        return count($contentIds);
+    }
+
     public function markConverted(string $contentId): void
     {
         $this->record('markConverted', ['contentId' => $contentId]);

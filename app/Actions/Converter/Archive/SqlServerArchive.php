@@ -425,6 +425,38 @@ class SqlServerArchive implements ArchiveGateway
         $this->write('undoConverted', fn () => $this->connection->update($sql, [self::RESERVED_FREE, $contentId]));
     }
 
+    public function freeReservation(array $contentIds): int
+    {
+        $freed = 0;
+
+        foreach (array_chunk(array_values($contentIds), self::MAX_IDS_PER_DELETE) as $chunk) {
+            $placeholders = implode(', ', array_fill(0, count($chunk), '?'));
+
+            // Two seat belts, because this writes the column the archive locks and judges with:
+            // a content the archive calls converted is never touched, and neither is one that has page
+            // images - whatever marker it carries, that is a verdict about work that exists. Everything
+            // else with a stale GUID in it is a worker that is never coming back.
+            // The threshold bit goes back to 0 with it: the failure marker and the bit are written
+            // together, and freeing one without the other leaves the content invisible to discovery.
+            $sql = <<<SQL
+                UPDATE GeneralContent
+                SET Reserved = ?, FS3dIndexItemCountThresholdStatus = 0, ModifyDate = GETDATE()
+                WHERE ID IN ({$placeholders})
+                  AND Reserved <> ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM MVDContent m
+                      WHERE m.ContentID = GeneralContent.ID AND m.Format LIKE ? AND m.Deleted = 0
+                  )
+                SQL;
+
+            $bindings = array_merge([self::RESERVED_FREE], $chunk, [self::RESERVED_CONVERTED, self::FORMAT_IMAGE_LIKE]);
+
+            $freed += (int) $this->write('freeReservation', fn (): int => $this->connection->update($sql, $bindings));
+        }
+
+        return $freed;
+    }
+
     public function markConverted(string $contentId): void
     {
         // Byte-identical to spUpdateCommentByContentIDAfterCoordinate with @Type = 1. All five columns

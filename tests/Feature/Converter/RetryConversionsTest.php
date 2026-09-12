@@ -2,6 +2,8 @@
 
 namespace Tests\Feature\Converter;
 
+use App\Actions\Converter\Archive\ArchiveGateway;
+use App\Actions\Converter\Archive\FakeArchive;
 use App\Actions\Converter\Pipeline\ConversionStatus;
 use App\Actions\Converter\Pipeline\Stage;
 use App\Models\Conversion;
@@ -65,6 +67,42 @@ class RetryConversionsTest extends TestCase
 
         $this->assertSame(ConversionStatus::Pending, $wanted->refresh()->status);
         $this->assertSame(ConversionStatus::Failed, $other->refresh()->status);
+    }
+
+    public function test_it_frees_the_content_in_the_archive_as_well_as_in_the_panel(): void
+    {
+        // The archive holds the lock, and it is still holding it: a content this pipeline gave up on
+        // carries the failure marker, and one the retired pipeline died on carries that worker's GUID.
+        // Putting the panel's row back without freeing the archive would spend the content's three
+        // attempts on "the archive has this content reserved by another worker" and stop where it began.
+        $archive = new FakeArchive;
+        $conversion = $this->failed(Stage::Upload);
+        $archive->addContent($conversion->content_id)->reserve($conversion->content_id, 'a worker that is long gone');
+        $this->app->instance(ArchiveGateway::class, $archive);
+
+        $this->artisan('converters:retry', ['--all' => true])
+            ->expectsOutputToContain('freed in the archive')
+            ->assertSuccessful();
+
+        $this->assertSame([$conversion->content_id], $archive->freedContents());
+        $this->assertNull($archive->ownerOf($conversion->content_id));
+        $this->assertSame(ConversionStatus::Pending, $conversion->refresh()->status);
+    }
+
+    public function test_a_content_the_archive_counts_as_converted_is_left_alone_there(): void
+    {
+        $archive = new FakeArchive;
+        $conversion = $this->failed(Stage::Upload);
+        $archive->addContent($conversion->content_id);
+        $archive->markConverted($conversion->content_id);
+        $this->app->instance(ArchiveGateway::class, $archive);
+
+        $this->artisan('converters:retry', ['--all' => true])->assertSuccessful();
+
+        // Queued again here, but its verdict in the archive is not this command's to overturn.
+        $this->assertSame([], $archive->freedContents());
+        $this->assertSame([$conversion->content_id], $archive->convertedContents());
+        $this->assertSame(ConversionStatus::Pending, $conversion->refresh()->status);
     }
 
     public function test_an_unknown_step_is_refused_with_the_list_of_steps(): void

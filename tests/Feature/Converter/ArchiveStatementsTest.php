@@ -135,6 +135,38 @@ class ArchiveStatementsTest extends TestCase
         );
     }
 
+    public function test_freeing_a_reservation_never_touches_a_content_that_has_pages(): void
+    {
+        // This writes the column the archive locks and judges with, on the production table, for a
+        // list of ids an operator passed in. Its two guards are the whole safety of the command:
+        // a content the archive calls converted is skipped, and so is one that has page images -
+        // whatever marker it carries, that is a verdict about work that exists.
+        $connection = new RecordingConnection(affected: 2);
+
+        $freed = (new SqlServerArchive($connection, 'on'))->freeReservation([
+            'C0000000-0000-0000-0000-000000000001',
+            'C0000000-0000-0000-0000-000000000002',
+        ]);
+
+        $this->assertSame(2, $freed);
+
+        $statement = $connection->onlyStatement();
+        $this->assertSame('update', $statement['method']);
+        $this->assertStringStartsWith('UPDATE GeneralContent', $statement['sql']);
+        $this->assertStringContainsString('FS3dIndexItemCountThresholdStatus = 0', $statement['sql']);
+        $this->assertStringContainsString('AND Reserved <> ?', $statement['sql']);
+        $this->assertStringContainsString('NOT EXISTS', $statement['sql']);
+        $this->assertStringContainsString('m.Deleted = 0', $statement['sql']);
+
+        $this->assertSame([
+            '00000000-0000-0000-0000-000000000000',
+            'C0000000-0000-0000-0000-000000000001',
+            'C0000000-0000-0000-0000-000000000002',
+            'DD18D1A0-C693-4379-B350-8F37E7612998',
+            'image/%',
+        ], $statement['bindings']);
+    }
+
     public function test_every_value_bound_to_a_uniqueidentifier_column_is_a_guid(): void
     {
         // The class of fault reserve() belonged to: a value that is a string here and a

@@ -94,6 +94,22 @@ interface ArchiveGateway
     public function markFailed(string $contentId): void;
 
     /**
+     * Frees contents nothing is working on any more, so they can be offered again, and says how many
+     * were freed.
+     *
+     * GeneralContent.Reserved is the archive's lock and its verdict at once. A worker that died with a
+     * content in its hands leaves its own GUID there for ever - the retired pipeline left thousands
+     * that way - and a content this pipeline gave up on carries the failure marker. Neither can be
+     * reserved again, so both are invisible to discovery and unreachable by a retry.
+     *
+     * A content that already has page images is never touched, whatever its marker says: that is the
+     * one state where the reservation is a verdict about work that exists.
+     *
+     * @param  list<string>  $contentIds
+     */
+    public function freeReservation(array $contentIds): int;
+
+    /**
      * The content's source PDF rows that are currently hidden, i.e. the ones a conversion flagged as
      * deleted. An undo needs them, and sourceFilesFor() cannot return them by definition.
      *

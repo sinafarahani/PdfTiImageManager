@@ -2,10 +2,12 @@
 
 namespace App\Console\Commands;
 
+use App\Actions\Converter\Archive\ArchiveGateway;
 use App\Actions\Converter\Pipeline\ConversionStatus;
 use App\Actions\Converter\Pipeline\Stage;
 use App\Models\Conversion;
 use Illuminate\Console\Command;
+use Throwable;
 
 /**
  * Puts failed conversions back in the queue.
@@ -15,9 +17,13 @@ use Illuminate\Console\Command;
  * rather than the document - the FTP site down, a full staging drive, the archive not answering -
  * this is how they are queued again, instead of writing SQL against the panel's database.
  *
- * Only the panel's own rows are touched. A content that ran out of attempts was already handed back
- * to the archive by the pipeline, so there is nothing to undo there; its pages and uploaded images
- * were removed when the attempt failed.
+ * It also frees the content in the archive, because the panel's row is only half of the state: a
+ * content this pipeline gave up on carries the archive's failure marker, and one the retired pipeline
+ * died holding still carries that worker's GUID. Neither can be reserved again, so a retry that only
+ * touched the panel would spend the content's attempts and land it straight back in failed.
+ *
+ * The pages and images of a failed attempt were already removed when it failed, so there is nothing
+ * else to undo.
  */
 class RetryConversions extends Command
 {
@@ -35,7 +41,7 @@ class RetryConversions extends Command
      */
     protected $description = 'Put failed conversions back in the queue';
 
-    public function handle(): int
+    public function handle(ArchiveGateway $archive): int
     {
         $failed = Conversion::query()->where('status', ConversionStatus::Failed);
 
@@ -66,13 +72,16 @@ class RetryConversions extends Command
 
         // Taken in one pass over the oldest failures, so a run that hits the limit can simply be run
         // again; the attempt count goes back to zero because the fault was not the document's.
-        $ids = $failed->orderBy('finished_at')->limit((int) $this->option('limit'))->pluck('id');
+        $matched = $failed->orderBy('finished_at')->limit((int) $this->option('limit'))->get(['id', 'content_id']);
+        $ids = $matched->pluck('id');
 
         if ($ids->isEmpty()) {
             $this->components->info('No failed conversion matches.');
 
             return self::SUCCESS;
         }
+
+        $this->freeInTheArchive($archive, $matched->pluck('content_id')->all());
 
         $put = Conversion::query()->whereIn('id', $ids)->update([
             'status' => ConversionStatus::Pending->value,
@@ -90,6 +99,36 @@ class RetryConversions extends Command
         $this->reportWhatFailed();
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Frees these contents in the archive, or says why it could not.
+     *
+     * Putting the panel's own row back is only half of it: the archive holds the lock. A content this
+     * pipeline gave up on carries the failure marker, and one the retired pipeline died on still
+     * carries that worker's GUID - either way reserve() can never win it again, and a retry without
+     * this would quietly spend the content's three attempts and put it straight back where it was.
+     *
+     * @param  list<string>  $contentIds
+     */
+    private function freeInTheArchive(ArchiveGateway $archive, array $contentIds): void
+    {
+        try {
+            $freed = $archive->freeReservation($contentIds);
+        } catch (Throwable $exception) {
+            report($exception);
+
+            $this->components->warn('The archive could not be reached, so the contents are queued but still locked there: '.$exception->getMessage());
+            $this->line('  They will fail at "taking the content" until this command is run again with the archive reachable and CONVERTER_WRITE_MODE=on.');
+
+            return;
+        }
+
+        $this->components->twoColumnDetail('freed in the archive', sprintf('%d of %d', $freed, count($contentIds)));
+
+        if ($freed < count($contentIds)) {
+            $this->line('  The rest are contents the archive already counts as converted, or that have page images: those are left alone.');
+        }
     }
 
     /**

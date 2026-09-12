@@ -3,6 +3,7 @@
 namespace App\Actions\Converter\Pipeline;
 
 use App\Models\Conversion;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 
 /**
@@ -79,6 +80,13 @@ class ConversionOverview
     {
         return Conversion::query()
             ->where('status', ConversionStatus::Failed)
+
+            // Contents whose source file the archive no longer has are counted on their own tile and
+            // kept out of here. There are thousands of them, they all say the same thing, and with
+            // them in the list the failures actually worth reading are never on screen.
+            ->where(function (Builder $query): void {
+                $query->whereNull('failure_stage')->orWhere('failure_stage', '!=', Stage::Missing->value);
+            })
             ->orderByDesc('finished_at')
             ->limit($limit)
             ->get(['id', 'content_id', 'failure_stage', 'failure_reason', 'attempts', 'finished_at']);
