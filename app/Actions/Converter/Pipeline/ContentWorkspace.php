@@ -61,8 +61,21 @@ class ContentWorkspace
         Log::warning("Could not delete the workspace {$path}; it will be removed by converters:sweep.");
     }
 
+    /**
+     * @throws WorkspaceUnavailable when the content id could not be a folder name under the root
+     */
     public function pathFor(string $contentId): string
     {
+        // open() deletes this folder and close() deletes it again, so the name has to be a name. A
+        // content id is a GUID everywhere it comes from the archive - but converters:try takes one
+        // from the command line, and "../.." there would point both deletions at a folder outside
+        // the workspace. Nothing downstream can undo that, so it is refused here.
+        if (preg_match('/^[A-Za-z0-9_-]{1,100}$/', $contentId) !== 1) {
+            throw new WorkspaceUnavailable(
+                "\"{$contentId}\" cannot be a workspace folder name; a content id is a GUID."
+            );
+        }
+
         return $this->root().DIRECTORY_SEPARATOR.strtolower($contentId);
     }
 

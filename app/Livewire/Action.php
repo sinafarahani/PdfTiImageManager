@@ -4,6 +4,7 @@ namespace App\Livewire;
 
 use App\Actions\Converter\ConverterStatus;
 use App\Actions\Converter\Pipeline\ConversionOverview;
+use App\Models\Conversion;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Gate;
@@ -41,6 +42,14 @@ class Action extends Component
     public array $counts = ['waiting' => 0, 'converting' => 0, 'done' => 0, 'failed' => 0, 'converted_today' => 0];
 
     /**
+     * The last few failures, so the step and the reason the pipeline records are actually visible.
+     *
+     * @var list<array{content: string, stage: string, reason: string, when: string}>
+     */
+    #[Locked]
+    public array $recentFailures = [];
+
+    /**
      * Number of contents to convert at the same time (the input field).
      */
     #[Validate('required|integer|min:1|max:64', onUpdate: false)]
@@ -49,7 +58,7 @@ class Action extends Component
     public function mount(ConverterStatus $converterStatus, ConversionOverview $overview): void
     {
         $this->showState($converterStatus->current());
-        $this->counts = $overview->counts();
+        $this->showWork($overview, $overview->counts());
     }
 
     /**
@@ -74,7 +83,25 @@ class Action extends Component
             $this->showState($state);
         }
 
+        $this->showWork($overview, $counts);
+    }
+
+    /**
+     * @param  array{waiting: int, converting: int, done: int, failed: int, converted_today: int}  $counts
+     */
+    private function showWork(ConversionOverview $overview, array $counts): void
+    {
         $this->counts = $counts;
+
+        // The failure list costs a query, so it is only fetched when there is something in it.
+        $this->recentFailures = $counts['failed'] === 0 ? [] : $overview->failures(5)
+            ->map(fn (Conversion $conversion): array => [
+                'content' => $conversion->content_id,
+                'stage' => $conversion->failure_stage?->label() ?? 'unknown',
+                'reason' => (string) $conversion->failure_reason,
+                'when' => $conversion->finished_at?->diffForHumans() ?? '',
+            ])
+            ->all();
     }
 
     /**

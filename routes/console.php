@@ -23,5 +23,12 @@ Schedule::command('converters:discover')
  */
 Schedule::command('converters:reconcile')->everyMinute()->withoutOverlapping();
 
+/*
+ * Removes the workspace folder a conversion that was killed mid-way left on the staging drive. The
+ * pipeline deletes its own folders; this is for the ones whose worker never got that far, and the
+ * drive filling up is what cost the old pipeline 206 contents.
+ */
+Schedule::command('converters:sweep')->hourly()->withoutOverlapping();
+
 // Failed queue jobs are only a transport record; the conversions table is the real history.
 Schedule::command('queue:prune-failed --hours=168')->daily();

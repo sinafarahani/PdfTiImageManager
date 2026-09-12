@@ -135,6 +135,17 @@ return [
             'appname' => 'PdfToImgManager',
             'login_timeout' => (int) env('ARCHIVE_DB_LOGIN_TIMEOUT', 5),
             'mask_bindings_in_exception_messages' => true,
+
+            /*
+             * Laravel's sqlsrv connector has no key for a statement timeout, so it is passed as a PDO
+             * option - the only way converter.archive.query_timeout can actually take effect. The
+             * constant is only defined when pdo_sqlsrv is loaded, and this file is also read on a
+             * machine without it (a build host, the test suite), so it is guarded. 0, the default, is
+             * what pdo_sqlsrv already does: no limit.
+             */
+            'options' => defined('PDO::SQLSRV_ATTR_QUERY_TIMEOUT') ? array_filter([
+                PDO::SQLSRV_ATTR_QUERY_TIMEOUT => (int) env('CONVERTER_QUERY_TIMEOUT', 0),
+            ]) : [],
         ],
 
     ],

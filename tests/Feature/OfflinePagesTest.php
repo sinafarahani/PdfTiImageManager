@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Testing\TestResponse;
+use Laravel\Fortify\Features;
 use Tests\TestCase;
 
 /**
@@ -19,7 +20,9 @@ class OfflinePagesTest extends TestCase
         $this->withoutVite();
 
         $this->assertLoadsNothingFromOtherHosts($this->get('/login'));
-        $this->assertLoadsNothingFromOtherHosts($this->get('/register'));
+        if (Features::enabled(Features::registration())) {
+            $this->assertLoadsNothingFromOtherHosts($this->get('/register'));
+        }
         $this->assertLoadsNothingFromOtherHosts($this->actingAs(User::factory()->create())->get('/dashboard'));
     }
 

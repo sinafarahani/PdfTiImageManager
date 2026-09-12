@@ -144,7 +144,9 @@ return [
     */
 
     'features' => [
-        Features::registration(),
+        // The panel is an internal tool: anyone who can reach it could otherwise create an account
+        // (they could only watch, since starting and stopping needs an administrator).
+        ...(env('ALLOW_REGISTRATION', false) ? [Features::registration()] : []),
         Features::resetPasswords(),
         // Features::emailVerification(),
         Features::updateProfileInformation(),

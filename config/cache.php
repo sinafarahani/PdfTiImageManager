@@ -13,6 +13,16 @@ return [
     | framework. This connection is utilized if another isn't explicitly
     | specified when running a cache operation inside the application.
     |
+    | Keep this on "database". The cache is not a cache here: ConverterStatus
+    | keeps Start/Stop in it, and the panel, the dispatcher, the supervisor and
+    | every queue worker are separate processes that have to agree on it. The
+    | "file" store puts that state in storage/framework/cache/data, where it is
+    | subject to the file permissions of whichever Windows account wrote it -
+    | the panel usually runs as one account and the supervisor task as another -
+    | and then a Start is written and never seen, with nothing logged. The
+    | database store is the same MySQL every process already has open, and the
+    | state can be read with SQL when somebody asks why Start did nothing.
+    |
     */
 
     'default' => env('CACHE_STORE', 'database'),

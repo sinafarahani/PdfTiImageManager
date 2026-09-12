@@ -13,6 +13,15 @@ use Illuminate\Support\Collection;
 class ConversionOverview
 {
     /**
+     * The four numbers on the dashboard, and today's total.
+     *
+     * One grouped count rather than four counts, because the dashboard polls this every two seconds
+     * and conversions is a table of half a million rows: the group by is answered from the
+     * [status, id] index without reading the table, and "converted today" from [status, finished_at],
+     * which is the index the second migration adds for exactly this query. It is still a scan of one
+     * index per poll, which is fine at this size and would not be at ten times it - if this table is
+     * ever kept for years rather than pruned, the four numbers belong in a counters row.
+     *
      * @return array{waiting: int, converting: int, done: int, failed: int, converted_today: int}
      */
     public function counts(): array

@@ -59,13 +59,17 @@ return [
     | Application Timezone
     |--------------------------------------------------------------------------
     |
-    | Here you may specify the default timezone for your application, which
-    | will be used by the PHP date and date-time functions. The timezone
-    | is set to "UTC" by default as it is suitable for most use cases.
+    | The timezone every date in this application is written in. It is not a
+    | display setting: the converter stamps MVDContent.CreateDateTime from it,
+    | and that same timestamp is the FTP folder a page image is stored in
+    | (<folder>/yyyy/MM/dd/HH/mm/ss/<id>.jpg). Set it to the archive server's
+    | own timezone - the one SQL Server's GETDATE() returns - or this
+    | pipeline's pages land in a folder tree the archive's other tools do not
+    | look in, and their dates read hours apart from every existing row.
     |
     */
 
-    'timezone' => 'UTC',
+    'timezone' => env('APP_TIMEZONE', 'UTC'),
 
     /*
     |--------------------------------------------------------------------------

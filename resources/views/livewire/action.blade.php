@@ -76,6 +76,27 @@
         </div>
     </dl>
 
+    @if ($recentFailures !== [])
+        <div class="mt-6">
+            <h3 class="text-sm font-medium text-gray-900">{{ __('Latest failures') }}</h3>
+            <ul class="mt-2 divide-y divide-gray-100 text-sm">
+                @foreach ($recentFailures as $failure)
+                    <li class="py-2">
+                        <div class="flex flex-wrap items-baseline gap-x-2">
+                            <span class="font-mono text-xs text-gray-500">{{ $failure['content'] }}</span>
+                            <span class="rounded bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700">{{ $failure['stage'] }}</span>
+                            <span class="text-xs text-gray-400">{{ $failure['when'] }}</span>
+                        </div>
+                        <p class="mt-0.5 text-xs text-gray-600">{{ $failure['reason'] }}</p>
+                    </li>
+                @endforeach
+            </ul>
+            <p class="mt-2 text-xs text-gray-500">
+                {{ __('Put them back with') }} <code class="rounded bg-gray-100 px-1">php artisan converters:retry --stage=&lt;step&gt;</code>
+            </p>
+        </div>
+    @endif
+
     @if ($runningThreads > 0)
         <p class="mt-4 text-xs text-gray-500">
             {{ trans_choice('Set to :count content at a time.|Set to :count contents at a time.', $runningThreads) }}

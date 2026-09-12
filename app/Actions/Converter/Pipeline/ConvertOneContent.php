@@ -11,8 +11,10 @@ use App\Actions\Converter\Render\PageRenderer;
 use App\Actions\Converter\Render\RenderFailed;
 use App\Actions\Converter\Render\Thumbnailer;
 use App\Models\Conversion;
+use Closure;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Throwable;
 
@@ -25,6 +27,16 @@ use Throwable;
  * from - so each page is written atomically and the conversion as a whole is made atomic by rolling
  * back: every page row and every uploaded file is recorded in conversion_pages *before* it is
  * created, so a failure removes exactly what this attempt made and the content is left as it was.
+ *
+ * Two orderings in here are load-bearing, and both are about what the *next* attempt can still see:
+ *
+ *  - the content is recorded converted before its PDFs are hidden, never the other way round. A
+ *    hidden PDF is invisible to sourceFilesFor(), so a crash between the two orderings' statements
+ *    would leave a content whose retry finds no source, marks it failed for good, and has already
+ *    had the pages of the previous attempt cleaned up: the document would be gone.
+ *  - nothing is written to the archive without the conversion row proving, that moment, that this
+ *    worker still holds the content. A worker the reconciler has given up on has had its page rows
+ *    deleted already, and a second attempt may be writing the content's pages right now.
  */
 class ConvertOneContent
 {
@@ -44,6 +56,13 @@ class ConvertOneContent
         $stage = Stage::Reserve;
 
         try {
+            // Nothing in the archive is touched before the row itself says this worker holds the
+            // content - not even the reservation. A job that outlived its claim would otherwise
+            // reserve, and then roll back, a content that belongs to another attempt.
+            if (! $this->stillOurs($conversion, $stage)) {
+                return;
+            }
+
             if (! $this->archive->reserve($contentId, $owner)) {
                 // Somebody else has it. We hold nothing in the archive, so nothing is released here.
                 $this->queue->fail($conversion, Stage::Reserve, 'the archive has this content reserved by another worker', retryable: true);
@@ -81,15 +100,29 @@ class ConvertOneContent
             try {
                 foreach ($sources as $source) {
                     $stage = Stage::Download;
+
+                    if (! $this->stillOurs($conversion, $stage)) {
+                        return;
+                    }
+
                     $pdf = $workspace.DIRECTORY_SEPARATOR.$source->remoteFileName();
                     $this->files->download($source->remoteFolder().'/'.$source->remoteFileName(), $pdf);
 
                     $stage = Stage::Render;
+
+                    if (! $this->stillOurs($conversion, $stage)) {
+                        return;
+                    }
+
                     $images = $this->renderer->render($pdf, $workspace.DIRECTORY_SEPARATOR.'pages');
 
                     foreach ($images as $image) {
                         $stage = Stage::Thumbnail;
-                        $this->queue->heartbeat($conversion);
+
+                        if (! $this->stillOurs($conversion, $stage)) {
+                            return;
+                        }
+
                         $thumbnail = $this->thumbnailer->make($image);
 
                         $stage = Stage::Write;
@@ -120,14 +153,44 @@ class ConvertOneContent
                         $bytes = $this->files->upload($image, $remotePath);
                         $this->queue->markPageUploaded($page, $remotePath, $bytes);
                     }
+                }
 
-                    // Only once its pages exist: the archive hides a source whose pages are stored.
-                    $stage = Stage::Finish;
-                    $this->archive->softDeleteSource($source->mvdId);
+                $stage = Stage::Finish;
+
+                // The last check before anything in the archive is made final. If this attempt has
+                // been taken over, its page rows are already deleted, and marking the content
+                // converted would leave the archive with a converted content and no pages - the
+                // verdict that hid 10,601 documents in the old pipeline.
+                if (! $this->stillOurs($conversion, $stage)) {
+                    return;
                 }
 
                 $this->archive->markConverted($contentId);
-                $this->queue->succeed($conversion, $pages);
+
+                if (! $this->queue->succeed($conversion, $pages)) {
+                    // The heartbeat above held, so the content cannot have gone stale in between
+                    // (that takes converter.failure.stale_after_minutes of silence) - but if it ever
+                    // does happen, the pages are written and the archive says converted while the
+                    // panel does not. That is shouted, not rolled back: the rows are the truth.
+                    Log::critical(sprintf(
+                        'Content %s was marked converted with %d page(s) in the archive, but conversion %d could not be recorded as done; the panel will show it as unfinished.',
+                        $contentId,
+                        $pages,
+                        $conversion->id,
+                    ));
+
+                    return;
+                }
+
+                // Hiding the PDFs is deliberately the very last step, after the content is recorded
+                // converted both in the archive and here, and it deliberately cannot fail the
+                // conversion. sourceFilesFor() only reads MVDContent rows with Deleted = 0, so a
+                // source hidden before the verdict is a document the next attempt cannot find: it
+                // would see no PDF row, mark the content failed for good, and the pages of the
+                // attempt it is retrying are gone. A source still visible is cosmetic by comparison.
+                foreach ($sources as $source) {
+                    $this->hideSource($source->mvdId);
+                }
             } finally {
                 // Neither the stage nor an exception from here may hide why the conversion failed:
                 // the working folder always goes, and a problem doing that is logged, not thrown.
@@ -229,6 +292,14 @@ class ConvertOneContent
             default => true,
         };
 
+        // Ownership before undoing anything. If the reconciler decided this attempt was dead, its
+        // page rows are already deleted and the content may be in another worker's hands: rollBack()
+        // would then delete that worker's pages and its uploaded images, and giveUp() would take the
+        // content off it.
+        if (! $this->stillOurs($conversion, $stage)) {
+            return;
+        }
+
         try {
             $this->rollBack($conversion);
         } catch (Throwable $rollback) {
@@ -240,18 +311,114 @@ class ConvertOneContent
 
     /**
      * Records the failure and hands the content back to the archive: free again when it will be
-     * tried once more, marked failed when it will not.
+     * tried once more, marked failed when the failure was a verdict about the document itself.
      */
     private function giveUp(Conversion $conversion, Stage $stage, string $reason, bool $retryable): void
     {
-        $this->queue->fail($conversion, $stage, $reason, $retryable);
-
-        if ($conversion->status === ConversionStatus::Failed) {
-            $this->archive->markFailed($conversion->content_id);
+        if (! $this->queue->fail($conversion, $stage, $reason, $retryable)) {
+            // The row is not ours any more, so the failure belongs to nobody: whoever holds the
+            // content now decides what happens to it, and its reservation is theirs to release.
+            $this->abandon($conversion, $stage);
 
             return;
         }
 
-        $this->archive->release($conversion->content_id);
+        // markFailed writes the archive's own "beyond help" marker, and that marker takes the content
+        // out of discovery for good - nothing finds it again until somebody clears it by hand. It is
+        // only ever right for a verdict about the document: no PDF row, or a PDF the renderer
+        // refuses, which is exactly what a failure that was never retryable is. A content that only
+        // ran out of attempts against a transient failure is a different thing entirely - a full
+        // staging drive, an FTP site that is down, an archive that is not answering - and marking
+        // those would walk through the queue burying half a million perfectly good documents three
+        // attempts at a time. They are released instead, so the panel's own row is the only record
+        // of the failure and a person can put the content back.
+        if ($conversion->status === ConversionStatus::Failed && ! $retryable) {
+            $this->handBack($conversion->content_id, fn () => $this->archive->markFailed($conversion->content_id));
+
+            return;
+        }
+
+        $this->handBack($conversion->content_id, fn () => $this->archive->release($conversion->content_id));
+    }
+
+    /**
+     * Puts the reservation back, or says loudly that it could not. A content whose reservation is
+     * still standing is invisible to discovery, and nothing else in the pipeline will ever clear it:
+     * the conversion is no longer claimed, so the reconciler will not look at it either.
+     */
+    private function handBack(string $contentId, Closure $write): void
+    {
+        try {
+            $write();
+        } catch (Throwable $exception) {
+            report($exception);
+
+            Log::critical(sprintf(
+                'The reservation on content %s could not be handed back (%s); GeneralContent.Reserved has to be cleared by hand before the content can be converted again.',
+                $contentId,
+                $exception->getMessage(),
+            ));
+        }
+    }
+
+    /**
+     * Pushes the heartbeat forward and answers whether this worker still holds the conversion.
+     *
+     * It is asked before every step that can run for minutes, because the gap between two heartbeats
+     * is what the reconciler judges a worker by: it has to stay well inside
+     * converter.failure.stale_after_minutes, and a download (converter.ftp.transfer_timeout, tried
+     * converter.ftp.attempts times) and a render (converter.render.timeout) are the two steps long
+     * enough to cross it on their own. Before this, the first heartbeat of a conversion came only
+     * after the download *and* the render of the first source - 45 minutes with the shipped
+     * timeouts, against a 60 minute staleness window that starts counting when the dispatcher
+     * claims the row, not when a worker picks the job up.
+     */
+    private function stillOurs(Conversion $conversion, Stage $stage): bool
+    {
+        if ($this->queue->heartbeat($conversion)) {
+            return true;
+        }
+
+        $this->abandon($conversion, $stage);
+
+        return false;
+    }
+
+    /**
+     * Stops working on a conversion this worker no longer holds, and undoes nothing at all.
+     *
+     * Rolling back here would be precisely the wrong move: the reconciler has already deleted this
+     * attempt's page rows, released the content and queued it again, so anything in the archive now
+     * belongs to the attempt that holds it. A page row this process wrote after losing the claim is
+     * in nobody's ledger, and the next attempt's rollBack() still finds it - imagePagesFor() reads
+     * the content's image rows straight out of the archive - so it is cleaned up there.
+     */
+    private function abandon(Conversion $conversion, Stage $stage): void
+    {
+        Log::warning(sprintf(
+            'Conversion %d of content %s was taken over while this worker was %s; it stopped without undoing anything.',
+            $conversion->id,
+            $conversion->content_id,
+            $stage->label(),
+        ));
+    }
+
+    /**
+     * Flags a converted content's PDF deleted, which is how the archive hides a source whose pages
+     * exist. A failure is logged and no more: by the time this runs the pages are stored and the
+     * content is converted, and failing it now would delete the very pages that succeeded.
+     */
+    private function hideSource(string $mvdId): void
+    {
+        try {
+            $this->archive->softDeleteSource($mvdId);
+        } catch (Throwable $exception) {
+            report($exception);
+
+            Log::warning(sprintf(
+                'MVDContent %s could not be flagged deleted; its content is converted and its pages are stored, so the PDF is only still visible alongside them.',
+                $mvdId,
+            ));
+        }
     }
 }

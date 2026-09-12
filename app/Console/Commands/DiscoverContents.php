@@ -9,6 +9,7 @@ use App\Models\Conversion;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
 use Illuminate\Database\Query\Builder;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use stdClass;
 
@@ -63,9 +64,27 @@ class DiscoverContents extends Command
             return self::FAILURE;
         }
 
-        $added = ! $this->seeded() && (bool) config('converter.discovery.seed_from_pdfconvert')
-            ? $this->seed($archive, $queue, $batch)
-            : $this->scan($archive, $queue, $batch);
+        try {
+            $added = ! $this->seeded() && (bool) config('converter.discovery.seed_from_pdfconvert')
+                ? $this->seed($archive, $queue, $batch)
+                : $this->scan($archive, $queue, $batch);
+        } catch (QueryException $exception) {
+            // This runs from the scheduler every converter.discovery.interval_minutes, so an archive
+            // that is unreachable or not configured yet must leave one line somebody can act on
+            // instead of a stack trace, over and over, in the scheduler's output. Nothing was queued
+            // and nothing was written: the watermark is only ever moved after a pass has read the
+            // archive, so the next pass covers exactly the same range again.
+            //
+            // Reported as well as printed, because schedule:run sends a scheduled command's output
+            // to NUL: the log is the only place a pass that failed at 03:00 can still be seen.
+            report($exception);
+
+            $this->error('The archive could not be read: '.$this->driverMessage($exception));
+            $this->line('Nothing was queued and the discovery watermark was left where it is.');
+            $this->line('Check the ARCHIVE_DB_* settings in .env and that this machine may reach the archive; `php artisan converters:preflight` tests the connection on its own.');
+
+            return self::FAILURE;
+        }
 
         $this->info(sprintf(
             'Queued %d new content(s); %d waiting, %d in the queue in total.',
@@ -174,6 +193,16 @@ class DiscoverContents extends Command
         }
 
         return $newest;
+    }
+
+    /**
+     * What is wrong, without the statement that hit it. A QueryException's own message repeats the
+     * whole SQL and its bindings - useful in a log, unreadable as the one line a scheduled command
+     * leaves behind - while the driver's message underneath it is the part that names the cause.
+     */
+    private function driverMessage(QueryException $exception): string
+    {
+        return $exception->getPrevious()?->getMessage() ?: $exception->getMessage();
     }
 
     /**

@@ -21,6 +21,7 @@ use App\Models\Conversion;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Sleep;
+use RuntimeException;
 use Tests\TestCase;
 
 class ConvertOneContentTest extends TestCase
@@ -30,6 +31,8 @@ class ConvertOneContentTest extends TestCase
     private const string CONTENT = '1c8f16cf-4635-42f8-971d-451b8a1b1ae1';
 
     private const string SOURCE_MVD = 'a47e40c9-e6a1-ed11-96cd-005056baa2b4';
+
+    private const string SECOND_MVD = 'b58f51da-f7b2-fe22-a7de-116167cbb3c5';
 
     private const string CREATED = '2023-02-01 07:43:38';
 
@@ -208,6 +211,122 @@ class ConvertOneContentTest extends TestCase
         $this->assertSame('somebody-else', $this->archive->ownerOf(self::CONTENT));
     }
 
+    public function test_a_failure_on_the_second_pdf_leaves_the_first_one_convertible_again(): void
+    {
+        // Two PDFs on one content. The pages of the first are written and uploaded before the second
+        // is even downloaded, so if its source row were hidden at that point, the retry would see one
+        // PDF instead of two and the content would end up converted with half its pages - silently,
+        // because sourceFilesFor() only returns rows that are not deleted.
+        $this->addSecondSource();
+        $conversion = $this->claimedConversion();
+
+        $this->pipeline(store: $this->failingStore(failOnUpload: 4))->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Pending, $conversion->status);
+        $this->assertSame([], $this->archive->softDeletedSources());
+
+        $conversion->update(['status' => ConversionStatus::Claimed, 'worker' => 'test', 'claimed_at' => now(), 'heartbeat_at' => now()]);
+        $this->pipeline()->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Done, $conversion->status);
+        $this->assertSame(6, $conversion->pages);
+        $this->assertCount(6, $this->archive->pages());
+        $this->assertCount(6, $this->uploadedImages());
+        $this->assertSame([self::SOURCE_MVD, self::SECOND_MVD], $this->archive->softDeletedSources());
+    }
+
+    public function test_a_failure_while_marking_the_content_converted_leaves_the_pdf_findable(): void
+    {
+        // The crash that used to lose a document: it happened between hiding the PDF and recording the
+        // content converted, and the retry then found no source row at all and marked the content
+        // failed for good - with the pages of the attempt it was retrying already cleaned up.
+        $this->archive = new class extends FakeArchive
+        {
+            public bool $refuse = true;
+
+            public function markConverted(string $contentId): void
+            {
+                if ($this->refuse) {
+                    $this->refuse = false;
+
+                    throw new RuntimeException('the archive connection dropped');
+                }
+
+                parent::markConverted($contentId);
+            }
+        };
+        $this->archive->addContent(self::CONTENT, profileId: 65);
+        $this->archive->addSourceFile(self::CONTENT, $this->pdfSource());
+
+        $conversion = $this->claimedConversion();
+        $this->pipeline()->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Pending, $conversion->status);
+        $this->assertSame([], $this->archive->softDeletedSources());
+        $this->assertCount(1, $this->archive->sourceFilesFor(self::CONTENT));
+        $this->assertSame([], $this->archive->convertedContents());
+
+        $conversion->update(['status' => ConversionStatus::Claimed, 'worker' => 'test', 'claimed_at' => now(), 'heartbeat_at' => now()]);
+        $this->pipeline()->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Done, $conversion->status);
+        $this->assertSame(3, $conversion->pages);
+        $this->assertSame([self::CONTENT], $this->archive->convertedContents());
+    }
+
+    public function test_a_worker_that_lost_its_claim_stops_instead_of_marking_the_content_converted(): void
+    {
+        // What the reconciler does to a conversion it believes is dead, done here in the middle of
+        // one: the row goes back to pending and the page ledger is emptied. The worker must notice at
+        // its next heartbeat and stop - the pages it has written are no longer recorded anywhere, so
+        // marking the content converted would leave the archive with a converted content whose pages
+        // the next attempt cannot find, and releasing it would take it off whoever holds it now.
+        $conversion = $this->claimedConversion();
+        $store = $this->reclaimingStore($conversion, onUpload: 2);
+
+        $this->pipeline(store: $store)->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Pending, $conversion->status);
+        $this->assertSame(1, $conversion->attempts);
+        $this->assertSame([], $this->archive->convertedContents());
+        $this->assertSame([], $this->archive->failedContents());
+        $this->assertSame([], $this->archive->softDeletedSources());
+
+        // The rows it wrote before it noticed belong to no ledger. The next attempt finds them in the
+        // archive itself and removes them, so the content still ends up with exactly its own pages.
+        $this->assertCount(2, $this->archive->pages());
+
+        $this->archive->release(self::CONTENT);
+        $conversion->update(['status' => ConversionStatus::Claimed, 'worker' => 'test', 'claimed_at' => now(), 'heartbeat_at' => now()]);
+        $this->pipeline()->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Done, $conversion->status);
+        $this->assertCount(3, $this->archive->pages());
+    }
+
+    public function test_a_transient_failure_that_runs_out_of_attempts_does_not_mark_the_content_failed(): void
+    {
+        // The archive's failed marker takes a content out of discovery for good, so it is only ever
+        // written for a verdict about the document. An FTP site that is down is not that: marking it
+        // would bury half a million good documents three attempts at a time.
+        config(['converter.failure.max_attempts' => 1]);
+        $conversion = $this->claimedConversion();
+
+        $this->pipeline(store: $this->failingStore(failOnUpload: 1))->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Failed, $conversion->status);
+        $this->assertSame(Stage::Upload, $conversion->failure_stage);
+        $this->assertSame([], $this->archive->failedContents());
+        $this->assertNull($this->archive->ownerOf(self::CONTENT));
+    }
+
     public function test_the_workspace_is_deleted_when_the_renderer_fails(): void
     {
         $conversion = $this->claimedConversion();
@@ -228,6 +347,75 @@ class ConvertOneContentTest extends TestCase
             new ConversionQueue,
             new ContentWorkspace($this->workspaceRoot, freeSpaceFloorGb: 0),
         );
+    }
+
+    /**
+     * A second PDF on the same content, with its file where the archive says it is.
+     */
+    private function addSecondSource(): void
+    {
+        $this->archive->addSourceFile(self::CONTENT, new SourceFile(
+            mvdId: self::SECOND_MVD,
+            seqPageNo: 2,
+            pageNo: '13870611_16_ettelaat_pdf_zamimeh_50.pdf',
+            createDateTime: self::CREATED,
+            format: 'Application/pdf',
+            ftpSiteId: 1,
+        ));
+
+        $folder = $this->store.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, '2023/02/01/07/43/38');
+        File::put($folder.DIRECTORY_SEPARATOR.self::SECOND_MVD.'.pdf', 'another pdf');
+    }
+
+    private function pdfSource(): SourceFile
+    {
+        return new SourceFile(
+            mvdId: self::SOURCE_MVD,
+            seqPageNo: 1,
+            pageNo: '13870611_16_ettelaat_pdf_zamimeh_49.pdf',
+            createDateTime: self::CREATED,
+            format: 'Application/pdf',
+            ftpSiteId: 1,
+        );
+    }
+
+    /**
+     * A file store that takes the conversion away from its worker on the given upload, the way
+     * converters:reconcile does to a claim it believes is dead.
+     */
+    private function reclaimingStore(Conversion $conversion, int $onUpload): FileStore
+    {
+        return new class($this->store, $conversion, $onUpload) extends LocalFileStore
+        {
+            private int $uploads = 0;
+
+            public function __construct(
+                string $root,
+                private readonly Conversion $conversion,
+                private readonly int $onUpload,
+            ) {
+                parent::__construct($root);
+            }
+
+            public function upload(string $localPath, string $remotePath): int
+            {
+                $bytes = parent::upload($localPath, $remotePath);
+
+                if (++$this->uploads === $this->onUpload) {
+                    Conversion::query()->whereKey($this->conversion->getKey())->update([
+                        'status' => ConversionStatus::Pending,
+                        'worker' => null,
+                        'claimed_at' => null,
+                        'heartbeat_at' => null,
+                        'attempts' => 1,
+                    ]);
+
+                    $this->conversion->pages()->delete();
+                }
+
+                return $bytes;
+            }
+        };
     }
 
     /**

@@ -9,6 +9,8 @@ use App\Models\Conversion;
 use App\Models\ConversionPage;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\QueryException;
+use Throwable;
 
 /**
  * Puts back the conversions a stopped worker left half finished.
@@ -60,6 +62,7 @@ class ReconcileConversions extends Command
 
         $reclaimed = 0;
         $orphans = [];
+        $stopped = false;
 
         foreach ($queue->stale($limit) as $conversion) {
             $this->warn(sprintf(
@@ -69,7 +72,28 @@ class ReconcileConversions extends Command
                 $conversion->heartbeat_at?->diffForHumans() ?? 'never',
             ));
 
-            $paths = $this->reclaim($conversion, $archive, $queue);
+            try {
+                $paths = $this->reclaim($conversion, $archive, $queue);
+            } catch (Throwable $exception) {
+                // The cleanup deletes page rows and releases the content, so it needs a reachable
+                // archive and CONVERTER_WRITE_MODE=on - and this command runs from the scheduler
+                // every minute, which would otherwise mean a stack trace a minute for as long as the
+                // archive is down or the panel is in dry-run mode.
+                //
+                // It stops rather than going on to the next conversion: every one of them would fail
+                // the same way, and each would first be taken over (its worker column rewritten to
+                // this reconciler) and then left standing, which is the state the next run has to
+                // wait a full staleness window to see again.
+                report($exception);
+
+                $this->error('  could not be cleaned up: '.$this->causeOf($exception));
+                $this->line('  it stays claimed, and the next run tries again; the other stale conversions were left untouched.');
+                $this->line('  the cleanup writes to the archive: it needs a reachable archive and CONVERTER_WRITE_MODE=on in .env.');
+
+                $stopped = true;
+
+                break;
+            }
 
             if ($paths === null) {
                 $this->line('  another reconciler has it; left alone.');
@@ -91,7 +115,19 @@ class ReconcileConversions extends Command
             count($orphans),
         ));
 
-        return self::SUCCESS;
+        return $stopped ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * What stopped the cleanup, without the statement it happened on. A QueryException repeats the
+     * whole SQL and its bindings in its message, which is right for the log report() just made and
+     * wrong for the single line a scheduled command leaves behind.
+     */
+    private function causeOf(Throwable $exception): string
+    {
+        return $exception instanceof QueryException
+            ? ($exception->getPrevious()?->getMessage() ?: $exception->getMessage())
+            : $exception->getMessage();
     }
 
     /**
