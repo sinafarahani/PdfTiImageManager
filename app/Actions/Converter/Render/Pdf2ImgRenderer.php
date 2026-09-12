@@ -112,7 +112,7 @@ class Pdf2ImgRenderer implements PageRenderer
         }
 
         if ($result->failed()) {
-            throw $this->failure($result->exitCode(), $this->shorten($result->errorOutput()), $looksLikePdf);
+            throw $this->failure($result->exitCode(), $this->shorten($result->errorOutput()), $looksLikePdf, basename($pdfPath));
         }
 
         return $this->pages($directory);
@@ -324,11 +324,11 @@ class Pdf2ImgRenderer implements PageRenderer
      * The failure for an exit code of pdf2img (see its README). $retryable separates the machine's
      * bad moments from the documents that will never render, whatever we do.
      */
-    private function failure(?int $exitCode, string $errorOutput, bool $looksLikePdf): RenderFailed
+    private function failure(?int $exitCode, string $errorOutput, bool $looksLikePdf, string $file): RenderFailed
     {
         if ($exitCode === null) {
             // The process never reached a state that has an exit code, which is the machine's problem.
-            return new RenderFailed('pdf2img ended without an exit code.', null, $errorOutput, true);
+            return new RenderFailed("pdf2img ended without an exit code while rendering {$file}.", null, $errorOutput, true);
         }
 
         [$reason, $retryable] = match ($exitCode) {
@@ -348,7 +348,9 @@ class Pdf2ImgRenderer implements PageRenderer
             default => ['pdf2img failed for an unknown reason', true],
         };
 
-        return new RenderFailed("pdf2img exited with {$exitCode}: {$reason}.", $exitCode, $errorOutput, $retryable);
+        // The file is named here as well as by the pipeline: this message is what reaches the log, and
+        // the name is the source row's own id, which is enough to find the document on the site.
+        return new RenderFailed("pdf2img exited with {$exitCode}: {$reason} ({$file}).", $exitCode, $errorOutput, $retryable);
     }
 
     /**
