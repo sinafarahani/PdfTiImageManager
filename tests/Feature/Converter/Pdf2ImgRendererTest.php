@@ -360,6 +360,38 @@ class Pdf2ImgRendererTest extends TestCase
     /**
      * The pdf2img of this machine: the configured one, or the one built in the tool's own repository.
      */
+    public function test_a_failure_says_how_the_file_itself_looks(): void
+    {
+        // Every PDF opens with "%PDF-1.x" and a line of binary, the cut-off ones included, so a header
+        // proves nothing about the document. What the end of the file says does: no %%EOF means the
+        // copy on the site is truncated, which is a different problem from one this tool cannot read.
+        File::put($this->pdf, "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        $this->fakePdf2Img([], 2, 'pdf2img: error: could not load document');
+
+        try {
+            (new Pdf2ImgRenderer)->render($this->pdf, $this->directory);
+            $this->fail('Exit code 2 must be a failure.');
+        } catch (RenderFailed $failure) {
+            $this->assertStringContainsString(basename($this->pdf), $failure->getMessage());
+            $this->assertStringContainsString('bytes', $failure->getMessage());
+            $this->assertStringContainsString('no %%EOF', $failure->getMessage());
+        }
+    }
+
+    public function test_a_whole_pdf_that_will_not_render_is_not_called_truncated(): void
+    {
+        File::put($this->pdf, "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n1 0 obj\nendobj\nstartxref\n9\n%%EOF\n");
+        $this->fakePdf2Img([], 2, 'pdf2img: error: could not load document');
+
+        try {
+            (new Pdf2ImgRenderer)->render($this->pdf, $this->directory);
+            $this->fail('Exit code 2 must be a failure.');
+        } catch (RenderFailed $failure) {
+            $this->assertStringContainsString('not a readable PDF', $failure->getMessage());
+            $this->assertStringNotContainsString('cut short', $failure->getMessage());
+        }
+    }
+
     private function realBinary(): ?string
     {
         $candidates = [

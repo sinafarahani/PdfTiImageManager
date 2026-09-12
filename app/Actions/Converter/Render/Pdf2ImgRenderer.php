@@ -57,6 +57,12 @@ class Pdf2ImgRenderer implements PageRenderer
     private const int HEADER_SEARCH_BYTES = 1024;
 
     /**
+     * Bytes of the end of the file searched for the %%EOF a whole PDF finishes with. The marker is the
+     * last line, but a producer may leave padding or a little junk after it.
+     */
+    private const int TAIL_SEARCH_BYTES = 2048;
+
+    /**
      * @return list<string>
      *
      * @throws RenderFailed
@@ -112,7 +118,7 @@ class Pdf2ImgRenderer implements PageRenderer
         }
 
         if ($result->failed()) {
-            throw $this->failure($result->exitCode(), $this->shorten($result->errorOutput()), $looksLikePdf, basename($pdfPath));
+            throw $this->failure($result->exitCode(), $this->shorten($result->errorOutput()), $looksLikePdf, $this->describeFile($pdfPath));
         }
 
         return $this->pages($directory);
@@ -145,6 +151,35 @@ class Pdf2ImgRenderer implements PageRenderer
         $head = @file_get_contents($pdfPath, length: self::HEADER_SEARCH_BYTES);
 
         return is_string($head) && str_contains($head, '%PDF-');
+    }
+
+    /**
+     * How the file itself looks, for the failure message: its size, and whether it ends the way a
+     * whole PDF ends.
+     *
+     * A header alone says nothing - every PDF opens with "%PDF-1.x" and a line of binary, including
+     * the ones that were cut off half way. The end is what tells them apart: a complete document
+     * finishes with a startxref and %%EOF, so a file that has a header and no ending is a damaged
+     * copy on the site rather than a document this tool cannot read, and that is worth saying.
+     */
+    private function describeFile(string $pdfPath): string
+    {
+        clearstatcache(true, $pdfPath);
+        $bytes = @filesize($pdfPath);
+
+        if ($bytes === false) {
+            return basename($pdfPath);
+        }
+
+        $tail = @file_get_contents($pdfPath, offset: max(0, $bytes - self::TAIL_SEARCH_BYTES));
+        $whole = is_string($tail) && str_contains($tail, '%%EOF');
+
+        return sprintf(
+            '%s, %s bytes%s',
+            basename($pdfPath),
+            number_format($bytes),
+            $whole ? '' : ', and it has no %%EOF: the copy on the file store is cut short',
+        );
     }
 
     /**
