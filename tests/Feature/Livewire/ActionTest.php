@@ -40,6 +40,36 @@ class ActionTest extends TestCase
         $response->assertSee('Stopped');
     }
 
+    public function test_anybody_can_watch_the_status_page_without_signing_in(): void
+    {
+        $this->withoutVite();
+        app(ConverterStatus::class)->set(ConverterStatus::RUNNING, 4);
+        $this->conversion(ConversionStatus::Pending);
+
+        $response = $this->get('/');
+
+        $response->assertOk();
+        $response->assertSeeLivewire(Action::class);
+        $response->assertSee('Waiting');
+        $response->assertSee('Sign in');
+
+        // Watching is all a visitor gets: no buttons, and the component refuses the actions anyway.
+        $response->assertDontSee('wire:click="stop"', escape: false);
+        $response->assertSee('Only administrators can start or stop the converters.');
+    }
+
+    public function test_a_visitor_who_is_not_signed_in_cannot_start_or_stop(): void
+    {
+        // The buttons are hidden from a visitor, so this is about the endpoint behind them: the gate is
+        // what refuses, not the template.
+        app(ConverterStatus::class)->set(ConverterStatus::RUNNING, 2);
+
+        Livewire::test(Action::class)->call('stop')->assertForbidden();
+        Livewire::test(Action::class)->set('threads', 4)->call('start')->assertForbidden();
+
+        $this->assertSame(ConverterStatus::RUNNING, app(ConverterStatus::class)->current()['status']);
+    }
+
     public function test_a_user_who_is_not_an_administrator_cannot_start_the_converters(): void
     {
         $this->actingAs(User::factory()->create());
