@@ -167,7 +167,8 @@ php artisan converters:try <GeneralContent.ID> --write
 ```
 
 Open that content in the archive's viewer and check the page order, the thumbnails, and that the images are on
-FTP. Only then set up the tasks below.
+FTP. If it is wrong, `php artisan converters:undo <id> --confirm` takes it back out: the page rows, their images,
+the flag that hid the source PDF, and the verdict on the content. Only when it is right, set up the tasks below.
 
 ## Running
 
@@ -196,6 +197,7 @@ php artisan queue:work --queue=conversions
 php artisan converters:reconcile    :: put interrupted conversions back
 php artisan converters:sweep        :: delete workspace folders nothing is converting
 php artisan converters:retry --all  :: put failed conversions back in the queue
+php artisan converters:undo <id>    :: take one content's pages back out of the archive
 ```
 
 When a batch of contents fails because of the machine rather than the documents - the FTP site down, a

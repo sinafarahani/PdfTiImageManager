@@ -369,6 +369,48 @@ class SqlServerArchive implements ArchiveGateway
         }
     }
 
+    /**
+     * @return list<SourceFile>
+     */
+    public function hiddenSourcesFor(string $contentId): array
+    {
+        // The mirror image of sourceFilesFor(): the PDF rows a conversion flagged as deleted, which is
+        // how an undo finds the original it has to put back on show.
+        $sql = <<<'SQL'
+            SELECT ID, SeqPageNo, PageNo, CreateDateTime, Format, FtpSiteID
+            FROM MVDContent
+            WHERE ContentID = ?
+              AND Deleted = 1
+              AND Format LIKE ?
+            ORDER BY SeqPageNo
+            SQL;
+
+        return $this->sourceFiles($sql, [$contentId, '%pdf%']);
+    }
+
+    public function restoreSource(string $mvdId): void
+    {
+        $this->write(
+            'restoreSource',
+            fn () => $this->connection->update('UPDATE MVDContent SET Deleted = 0 WHERE ID = ?', [$mvdId]),
+        );
+    }
+
+    public function undoConverted(string $contentId): void
+    {
+        // Exactly what markConverted() writes, written back: the content becomes free, not viewable,
+        // and below discovery's threshold again, so the next pass offers it like any other. The
+        // RenderMediaId the archive uses for "not rendered" is the one its own claim query excludes -
+        // anything but 1 - and 6 is what the contents waiting in the queue carry.
+        $sql = <<<'SQL'
+            UPDATE GeneralContent
+            SET FS3dIndexItemCountThresholdStatus = 0, Reserved = ?, RenderMediaId = 6, HasView = 0, ModifyDate = GETDATE()
+            WHERE ID = ?
+            SQL;
+
+        $this->write('undoConverted', fn () => $this->connection->update($sql, [self::RESERVED_FREE, $contentId]));
+    }
+
     public function markConverted(string $contentId): void
     {
         // Byte-identical to spUpdateCommentByContentIDAfterCoordinate with @Type = 1. All five columns

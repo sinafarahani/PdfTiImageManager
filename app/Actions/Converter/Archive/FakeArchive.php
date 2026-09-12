@@ -40,6 +40,12 @@ class FakeArchive implements ArchiveGateway
     /** @var list<string> */
     private array $softDeleted = [];
 
+    /** @var list<string> source rows put back on show by an undo */
+    private array $restored = [];
+
+    /** @var list<string> contents taken back to "not converted" */
+    private array $undone = [];
+
     /** @var array<int, StoreMode> */
     private array $storeModes = [];
 
@@ -128,6 +134,22 @@ class FakeArchive implements ArchiveGateway
     public function softDeletedSources(): array
     {
         return $this->softDeleted;
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function restoredSources(): array
+    {
+        return $this->restored;
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function undoneContents(): array
+    {
+        return $this->undone;
     }
 
     /**
@@ -262,6 +284,30 @@ class FakeArchive implements ArchiveGateway
         foreach ($mvdIds as $mvdId) {
             unset($this->pages[$mvdId]);
         }
+    }
+
+    public function hiddenSourcesFor(string $contentId): array
+    {
+        return array_values(array_filter(
+            $this->sourceFiles[$contentId] ?? [],
+            fn (SourceFile $file): bool => $file->isPdf() && in_array($file->mvdId, $this->softDeleted, true),
+        ));
+    }
+
+    public function restoreSource(string $mvdId): void
+    {
+        $this->softDeleted = array_values(array_diff($this->softDeleted, [$mvdId]));
+        $this->restored[] = $mvdId;
+    }
+
+    public function undoConverted(string $contentId): void
+    {
+        // The twin of markConverted: the content becomes discoverable again, which is what makes an
+        // undo followed by a retry behave like a content that was never converted.
+        $this->converted = array_values(array_diff($this->converted, [$contentId]));
+        $this->failed = array_values(array_diff($this->failed, [$contentId]));
+        unset($this->reservations[$contentId]);
+        $this->undone[] = $contentId;
     }
 
     public function markConverted(string $contentId): void

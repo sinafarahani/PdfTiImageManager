@@ -92,4 +92,25 @@ interface ArchiveGateway
     public function markConverted(string $contentId): void;
 
     public function markFailed(string $contentId): void;
+
+    /**
+     * The content's source PDF rows that are currently hidden, i.e. the ones a conversion flagged as
+     * deleted. An undo needs them, and sourceFilesFor() cannot return them by definition.
+     *
+     * @return list<SourceFile>
+     */
+    public function hiddenSourcesFor(string $contentId): array;
+
+    /**
+     * Puts a source PDF back on show, for undoing a conversion: the row is the archive's only record
+     * of the original file.
+     */
+    public function restoreSource(string $mvdId): void;
+
+    /**
+     * Takes a content back to "not converted": the marker, the viewable flags and the threshold bit
+     * that markConverted() set, so discovery can offer it again. Everything markConverted writes,
+     * written back.
+     */
+    public function undoConverted(string $contentId): void;
 }

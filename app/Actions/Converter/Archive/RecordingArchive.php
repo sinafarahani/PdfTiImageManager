@@ -193,6 +193,21 @@ class RecordingArchive implements ArchiveGateway
         $this->record('markConverted', ['contentId' => $contentId]);
     }
 
+    public function hiddenSourcesFor(string $contentId): array
+    {
+        return $this->archive->hiddenSourcesFor($contentId);
+    }
+
+    public function restoreSource(string $mvdId): void
+    {
+        $this->record('restoreSource', ['mvdId' => $mvdId]);
+    }
+
+    public function undoConverted(string $contentId): void
+    {
+        $this->record('undoConverted', ['contentId' => $contentId]);
+    }
+
     public function markFailed(string $contentId): void
     {
         $this->record('markFailed', ['contentId' => $contentId]);
