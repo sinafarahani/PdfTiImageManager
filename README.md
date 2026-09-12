@@ -186,6 +186,45 @@ Three things run on the server.
   discovers new work every `CONVERTER_DISCOVERY_INTERVAL` minutes, puts interrupted conversions back every
   minute, deletes leftover workspace folders every hour, and prunes the failed-job records daily.
 
+All three must be running; the converter is the one that does the work, and without it Start changes the panel's
+state and nothing converts.
+
+### As Windows services, with NSSM
+
+An alternative to the two Task Scheduler entries, and easier to see the state of. Three services, one per
+process above — `artisan schedule:work` replaces the every-minute `schedule:run` task, because it stays running
+and fires the scheduled commands itself.
+
+```bat
+nssm install PdfToImgConverter C:\php\php.exe artisan converters:supervise
+nssm set PdfToImgConverter AppDirectory F:\PdfTOImgManager
+nssm set PdfToImgConverter ObjectName .\YourUser YourPassword
+nssm set PdfToImgConverter DependOnService MySQL80
+nssm set PdfToImgConverter AppStdout F:\PdfTOImgManager\storage\logs\converter.out.log
+nssm set PdfToImgConverter AppRotateFiles 1
+nssm set PdfToImgConverter AppRotateBytes 10485760
+nssm set PdfToImgConverter AppThrottle 5000
+```
+
+The same three settings decide whether this works at all:
+
+- **`AppDirectory`** must be the project folder. Artisan run from anywhere else fails immediately.
+- **`ObjectName`** must be an account that can reach the archive, the FTP site and the workspace drive.
+  LocalSystem cannot see a mapped drive at all, and often cannot reach the network either.
+- **`DependOnService`** on the database, or on boot the converter starts first and spends its first minutes
+  failing to read its own queue.
+
+Use the full path to `php.exe`: a service does not inherit an interactive PATH. The system PATH still applies,
+which is what lets `php_imagick.dll` find the ImageMagick libraries next to `php.exe`.
+
+Only one supervisor can run. A second one exits with "another supervisor is already running this panel", which
+it knows through the database cache — so `CACHE_STORE=database` matters here too.
+
+**Stopping:** NSSM kills the process tree, so a worker in the middle of a conversion dies with it. Nothing is
+lost — `converters:reconcile` cleans that content up and queues it again — but it waits out
+`CONVERTER_STALE_AFTER_MINUTES` first. The clean order is: press **Stop** in the panel, wait until it says
+*Stopped*, then stop the service. Starting is the reverse.
+
 Everything can also be run by hand, which is what you want while setting up:
 
 ```bat
