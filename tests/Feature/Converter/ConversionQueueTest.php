@@ -135,6 +135,24 @@ class ConversionQueueTest extends TestCase
         $this->assertSame(2, Conversion::query()->sole()->attempts);
     }
 
+    public function test_a_heartbeat_written_twice_in_the_same_second_still_says_the_worker_holds_it(): void
+    {
+        // The heartbeat is what tells a slow conversion from a dead worker, and a false answer makes
+        // a worker give up a content it is holding. Writing the timestamp the row already holds must
+        // therefore still answer yes: on MySQL an UPDATE that changes nothing reports no rows, and
+        // reading that count as the answer cost every conversion on the server its first heartbeat.
+        CarbonImmutable::setTestNow(now());
+        $queue = new ConversionQueue;
+        $queue->add([new DiscoveredContent(fake()->uuid(), 65, null)]);
+        $conversion = $queue->claim('worker-1', 1)->first();
+        $this->assertNotNull($conversion);
+
+        $this->assertTrue($queue->heartbeat($conversion));
+        $this->assertTrue($queue->heartbeat($conversion));
+
+        CarbonImmutable::setTestNow();
+    }
+
     public function test_a_worker_that_lost_its_content_can_no_longer_change_it(): void
     {
         $this->queue->add([$this->content('C1')]);

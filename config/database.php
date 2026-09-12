@@ -60,7 +60,17 @@ return [
             'engine' => null,
             'options' => extension_loaded('pdo_mysql') ? array_filter([
                 (PHP_VERSION_ID >= 80400 ? Mysql::ATTR_SSL_CA : PDO::MYSQL_ATTR_SSL_CA) => env('MYSQL_ATTR_SSL_CA'),
-            ]) : [],
+
+                /*
+                 * Report the rows an UPDATE matched, not the rows it changed. MySQL's default counts
+                 * only rows whose values actually differ, so writing a value a row already holds
+                 * reports nothing was updated - and code that reads that count as "the row I meant
+                 * to write is still there" then believes it is gone. The converter's heartbeat hit
+                 * exactly that, and sqlite (what the tests run on) counts matched rows, so nothing
+                 * caught it here.
+                 */
+                (PHP_VERSION_ID >= 80400 ? Mysql::ATTR_FOUND_ROWS : PDO::MYSQL_ATTR_FOUND_ROWS) => true,
+            ], fn (mixed $value): bool => $value !== null) : [],
         ],
 
         'mariadb' => [

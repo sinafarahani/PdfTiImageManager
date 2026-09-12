@@ -178,13 +178,7 @@ class ConversionQueue
     {
         $now = now();
 
-        $kept = $this->whileHeldBy($conversion)->update(['heartbeat_at' => $now, 'updated_at' => $now]) === 1;
-
-        if ($kept) {
-            $this->syncInMemory($conversion, ['heartbeat_at' => $now]);
-        }
-
-        return $kept;
+        return $this->writeWhileHeld($conversion, ['heartbeat_at' => $now, 'updated_at' => $now]);
     }
 
     /**
@@ -206,13 +200,7 @@ class ConversionQueue
             'updated_at' => $now,
         ];
 
-        $recorded = $this->whileHeldBy($conversion)->update($attributes) === 1;
-
-        if ($recorded) {
-            $this->syncInMemory($conversion, $attributes);
-        }
-
-        return $recorded;
+        return $this->writeWhileHeld($conversion, $attributes);
     }
 
     /**
@@ -273,13 +261,7 @@ class ConversionQueue
      */
     public function takeOver(Conversion $conversion, string $reclaimer): bool
     {
-        $taken = $this->whileHeldBy($conversion)->update(['worker' => $reclaimer, 'updated_at' => now()]) === 1;
-
-        if ($taken) {
-            $this->syncInMemory($conversion, ['worker' => $reclaimer]);
-        }
-
-        return $taken;
+        return $this->writeWhileHeld($conversion, ['worker' => $reclaimer, 'updated_at' => now()]);
     }
 
     /**
@@ -364,6 +346,34 @@ class ConversionQueue
      *
      * @return Builder<Conversion>
      */
+    /**
+     * Writes to the conversion, but only while the worker in hand still holds it, and says whether
+     * it did.
+     *
+     * Whether the row is still ours is asked with a SELECT, not read from the number of rows the
+     * UPDATE reports. MySQL reports the rows it *changed*: a heartbeat written twice inside one
+     * second writes the timestamp the row already holds, so it changed nothing, the count came back 0
+     * and read as "another worker has this content" - and the worker abandoned a conversion it was
+     * holding perfectly well. It happens on MySQL only, and sqlite (what the tests run on) counts
+     * matched rows, so nothing here could see it. The two statements share a transaction and the row
+     * is locked, so the answer cannot change between them.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function writeWhileHeld(Conversion $conversion, array $attributes): bool
+    {
+        return $this->connection()->transaction(function () use ($conversion, $attributes): bool {
+            if (! $this->whileHeldBy($conversion)->lockForUpdate()->exists()) {
+                return false;
+            }
+
+            $this->whileHeldBy($conversion)->update($attributes);
+            $this->syncInMemory($conversion, $attributes);
+
+            return true;
+        });
+    }
+
     private function whileHeldBy(Conversion $conversion): Builder
     {
         return Conversion::query()
