@@ -57,7 +57,7 @@
         @enderror
     </div>
 
-    <dl class="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+    <dl class="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-5">
         <div class="rounded-xl bg-gray-50 px-4 py-3">
             <dt class="text-xs font-medium text-gray-500">{{ __('Waiting') }}</dt>
             <dd class="text-lg font-semibold text-gray-900">{{ number_format($counts['waiting']) }}</dd>
@@ -69,6 +69,11 @@
         <div class="rounded-xl bg-gray-50 px-4 py-3">
             <dt class="text-xs font-medium text-gray-500">{{ __('Converted today') }}</dt>
             <dd class="text-lg font-semibold text-gray-900">{{ number_format($counts['converted_today']) }}</dd>
+        </div>
+        <div class="rounded-xl bg-gray-50 px-4 py-3">
+            {{-- The archive lists a source file it no longer has: nothing to convert and nothing to fix here. --}}
+            <dt class="text-xs font-medium text-gray-500">{{ __('No source file') }}</dt>
+            <dd class="text-lg font-semibold text-gray-700">{{ number_format($counts['missing']) }}</dd>
         </div>
         <div class="rounded-xl bg-gray-50 px-4 py-3">
             <dt class="text-xs font-medium text-gray-500">{{ __('Failed') }}</dt>

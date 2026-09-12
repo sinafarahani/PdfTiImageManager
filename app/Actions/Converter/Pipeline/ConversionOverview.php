@@ -22,21 +22,32 @@ class ConversionOverview
      * index per poll, which is fine at this size and would not be at ten times it - if this table is
      * ever kept for years rather than pruned, the four numbers belong in a counters row.
      *
-     * @return array{waiting: int, converting: int, done: int, failed: int, converted_today: int}
+     * @return array{waiting: int, converting: int, done: int, missing: int, failed: int, converted_today: int}
      */
     public function counts(): array
     {
+        // Grouped by the step as well as the status, in the same one query, because a content whose
+        // source file the archive lists but no longer has is not a failure of this pipeline: there are
+        // thousands of those stale rows, and counting them with the real failures would bury them.
+        $grouped = Conversion::query()
+            ->selectRaw('status, failure_stage, count(*) as total')
+            ->groupBy('status', 'failure_stage')
+            ->get();
+
         /** @var Collection<string, int> $byStatus */
-        $byStatus = Conversion::query()
-            ->selectRaw('status, count(*) as total')
-            ->groupBy('status')
-            ->pluck('total', 'status');
+        $byStatus = $grouped->groupBy('status')->map(fn (Collection $rows): int => (int) $rows->sum('total'));
+
+        $missing = (int) $grouped
+            ->where('status', ConversionStatus::Failed->value)
+            ->where('failure_stage', Stage::Missing->value)
+            ->sum('total');
 
         return [
             'waiting' => (int) $byStatus->get(ConversionStatus::Pending->value, 0),
             'converting' => (int) $byStatus->get(ConversionStatus::Claimed->value, 0),
             'done' => (int) $byStatus->get(ConversionStatus::Done->value, 0),
-            'failed' => (int) $byStatus->get(ConversionStatus::Failed->value, 0),
+            'missing' => $missing,
+            'failed' => (int) $byStatus->get(ConversionStatus::Failed->value, 0) - $missing,
             'converted_today' => Conversion::query()
                 ->where('status', ConversionStatus::Done)
                 ->where('finished_at', '>=', now()->startOfDay())

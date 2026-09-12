@@ -286,6 +286,39 @@ class ArchiveFtpClientTest extends TestCase
         Sleep::assertNeverSlept();
     }
 
+    public function test_a_file_that_is_gone_is_recognised_even_when_the_refusal_says_nothing(): void
+    {
+        // What the archive's own site answers for its thousands of stale rows: no reply code and no
+        // wording to match on - the whole message is "End". Read for meaning, that looked like a
+        // transient failure, so every dead row cost three FTP attempts and then three conversion
+        // attempts. The folder is asked instead, and it answers plainly.
+        $this->server->write('DOI/2025/still-here.pdf', 'x');
+        $this->server->failTimes('RETR', 3, 'End');
+        $client = $this->client(['attempts' => 3, 'retry_seconds' => 5]);
+
+        $failure = $this->failureOf(fn () => $client->download('2025/gone.pdf', $this->workspace.DIRECTORY_SEPARATOR.'gone.pdf'));
+
+        $this->assertTrue($failure->absent);
+        $this->assertFalse($failure->transient);
+        $this->assertStringContainsString('not on the server', $failure->getMessage());
+        $this->assertSame(1, count(array_filter($this->server->commands(), fn (string $command): bool => str_starts_with($command, 'RETR'))));
+        Sleep::assertNeverSlept();
+    }
+
+    public function test_the_same_silent_refusal_is_still_retried_when_the_file_is_there(): void
+    {
+        // The other half of it: an unreadable refusal for a file the folder does list is the transfer
+        // having a bad moment, and giving up on that would throw away a content that is perfectly fine.
+        $this->server->write('DOI/2025/page.pdf', $contents = random_bytes(32));
+        $this->server->failTimes('RETR', 1, 'End');
+        $local = $this->workspace.DIRECTORY_SEPARATOR.'page.pdf';
+        $client = $this->client(['attempts' => 3, 'retry_seconds' => 5]);
+
+        $this->assertSame(32, $client->download('2025/page.pdf', $local));
+        $this->assertSame($contents, file_get_contents($local));
+        Sleep::assertSleptTimes(1);
+    }
+
     public function test_a_session_the_server_dropped_is_opened_again_without_waiting(): void
     {
         $this->server->dropTimes('SIZE', 1);

@@ -180,6 +180,49 @@ class ConvertOneContentTest extends TestCase
         $this->assertCount(3, $this->uploadedImages());
     }
 
+    public function test_a_source_file_that_is_not_on_the_store_is_given_up_on_at_once(): void
+    {
+        // The archive has thousands of rows naming files that are no longer on the site. Each one used
+        // to cost three FTP attempts and then three conversion attempts; there is nothing to wait for.
+        config(['converter.failure.max_attempts' => 3]);
+        File::delete($this->store.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, '2023/02/01/07/43/38').DIRECTORY_SEPARATOR.self::SOURCE_MVD.'.pdf');
+        $conversion = $this->claimedConversion();
+
+        $this->pipeline()->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Failed, $conversion->status);
+        $this->assertSame(Stage::Missing, $conversion->failure_stage);
+        $this->assertSame(1, $conversion->attempts);
+        $this->assertStringContainsString('not on the file store', (string) $conversion->failure_reason);
+
+        // Marked failed in the archive, so discovery stops offering it, and nothing was written.
+        $this->assertSame([self::CONTENT], $this->archive->failedContents());
+        $this->assertSame([], $this->archive->pages());
+        $this->assertSame([], $this->archive->convertedContents());
+    }
+
+    public function test_a_download_that_failed_for_another_reason_is_still_retried(): void
+    {
+        // A right that was taken away or a site mid-restore is not a stale row: calling those missing
+        // would file a fixable problem under an outcome nothing ever retries.
+        $store = new class($this->store) extends LocalFileStore
+        {
+            public function download(string $remotePath, string $localPath): int
+            {
+                throw FileStoreException::transient('the data connection dropped');
+            }
+        };
+
+        $conversion = $this->claimedConversion();
+
+        $this->pipeline(store: $store)->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Pending, $conversion->status);
+        $this->assertSame(Stage::Download, $conversion->failure_stage);
+    }
+
     public function test_a_damaged_pdf_is_marked_failed_in_the_archive_and_not_retried(): void
     {
         config(['converter.failure.max_attempts' => 3]);

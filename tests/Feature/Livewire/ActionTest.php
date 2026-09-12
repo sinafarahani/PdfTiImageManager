@@ -4,6 +4,7 @@ namespace Tests\Feature\Livewire;
 
 use App\Actions\Converter\ConverterStatus;
 use App\Actions\Converter\Pipeline\ConversionStatus;
+use App\Actions\Converter\Pipeline\Stage;
 use App\Livewire\Action;
 use App\Models\Conversion;
 use App\Models\User;
@@ -144,6 +145,21 @@ class ActionTest extends TestCase
             ->assertSee('Failed');
     }
 
+    public function test_contents_whose_source_file_is_gone_are_counted_apart_from_failures(): void
+    {
+        // The archive lists thousands of files it no longer has. Those are its own stale rows, not
+        // conversions that went wrong, and counting them together would bury the ones worth looking at.
+        $this->conversion(ConversionStatus::Failed, stage: Stage::Missing);
+        $this->conversion(ConversionStatus::Failed, stage: Stage::Missing);
+        $this->conversion(ConversionStatus::Failed, stage: Stage::Upload);
+        $this->actingAs(User::factory()->create());
+
+        Livewire::test(Action::class)
+            ->assertSet('counts.missing', 2)
+            ->assertSet('counts.failed', 1)
+            ->assertSee('No source file');
+    }
+
     public function test_polling_keeps_the_number_being_typed(): void
     {
         $this->actingAs(User::factory()->admin()->create());
@@ -223,12 +239,13 @@ class ActionTest extends TestCase
             ->assertSeeHtml('wire:click="stop"');
     }
 
-    private function conversion(ConversionStatus $status, mixed $finishedAt = null): Conversion
+    private function conversion(ConversionStatus $status, mixed $finishedAt = null, ?Stage $stage = null): Conversion
     {
         return Conversion::query()->create([
             'content_id' => fake()->uuid(),
             'profile_id' => 65,
             'status' => $status,
+            'failure_stage' => $stage,
             'worker' => $status === ConversionStatus::Claimed ? 'test' : null,
             'claimed_at' => $status === ConversionStatus::Claimed ? now() : null,
             'heartbeat_at' => $status === ConversionStatus::Claimed ? now() : null,

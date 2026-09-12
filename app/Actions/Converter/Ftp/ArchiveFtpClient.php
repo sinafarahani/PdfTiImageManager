@@ -420,9 +420,43 @@ class ArchiveFtpClient implements FileStore
     {
         $message = $this->describe($operation, $path, $reply);
 
+        // Before anything is read out of the words: is the file even there? A server may refuse a
+        // download with no reply code and nothing recognisable to match on - the archive's own answers
+        // arrive as "failed: End" - and guessing wrong in that direction is expensive, because
+        // thousands of its rows name files that are long gone and each was then retried three times
+        // over, and three times again as a conversion. The folder says it plainly, in one command.
+        if ($operation === 'download' && $this->listed($connection, $path) === false) {
+            return FileStoreException::absent($this->describe($operation, $path, 'the file is not on the server'));
+        }
+
         return $this->answered($connection, $elapsed) && $this->isFinal($reply)
             ? FileStoreException::permanent($message)
             : FileStoreException::transient($message);
+    }
+
+    /**
+     * Whether the server lists the file in its own folder: true, false, or null when the listing
+     * itself could not be had, which is not an answer about the file.
+     */
+    private function listed(Connection $connection, string $path): ?bool
+    {
+        $folder = str_contains($path, '/') ? substr($path, 0, (int) strrpos($path, '/')) : '';
+
+        [$entries] = $this->silently(fn (): array|false => ftp_nlist($connection, $folder === '' ? '/' : $folder));
+
+        if (! is_array($entries)) {
+            return null;
+        }
+
+        $name = strtolower(basename($path));
+
+        foreach ($entries as $entry) {
+            if (strtolower(basename(str_replace('\\', '/', (string) $entry))) === $name) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -480,6 +514,15 @@ class ArchiveFtpClient implements FileStore
      */
     private function isFinal(string $reply): bool
     {
+        // The reply code says it, and says it in every language the server might phrase the rest in:
+        // FTP's 5xx is "do not ask again", 4xx is "try later" (RFC 959 §4.2). The archive has thousands
+        // of rows pointing at files that are no longer on the site, and every one of those answers
+        // 550: reading the words alone left them looking transient, which cost three FTP attempts and
+        // then three conversion attempts each before the content was finally given up on.
+        if (preg_match('/(?:^|\D)([45])\d\d(?:\D|$)/', $reply, $code) === 1) {
+            return $code[1] === '5';
+        }
+
         return preg_match(
             '/\b(no such|not found|does not exist|cannot find|no file|not a (?:plain )?file|permission|access denied|not allowed|forbidden|unknown command|not implemented|not understood|unsupported)\b/i',
             $reply,

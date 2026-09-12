@@ -105,8 +105,24 @@ class ConvertOneContent
                         return;
                     }
 
+                    $remote = $source->remoteFolder().'/'.$source->remoteFileName();
                     $pdf = $workspace.DIRECTORY_SEPARATOR.$source->remoteFileName();
-                    $this->files->download($source->remoteFolder().'/'.$source->remoteFileName(), $pdf);
+
+                    try {
+                        $this->files->download($remote, $pdf);
+                    } catch (FileStoreException $exception) {
+                        // Thousands of the archive's rows name a file that is not on the site any more.
+                        // There is nothing to convert and nothing to wait for, so the content is given
+                        // up on at once instead of spending three attempts on it - and it is recorded
+                        // as its own outcome, so a stale row is never mistaken for an FTP problem.
+                        if ($exception->absent) {
+                            $this->giveUp($conversion, Stage::Missing, "the source PDF is not on the file store: {$remote}", retryable: false);
+
+                            return;
+                        }
+
+                        throw $exception;
+                    }
 
                     $stage = Stage::Render;
 

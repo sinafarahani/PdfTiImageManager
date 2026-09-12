@@ -10,6 +10,13 @@ enum Stage: string
 {
     case Reserve = 'reserve';
     case Metadata = 'metadata';
+
+    /**
+     * The archive names a source file that is not on the file store any more. Its own outcome, and
+     * never retried: the row is stale, and no number of attempts will bring the file back. Keeping it
+     * apart from a download that failed is what lets the two be counted - and retried - separately.
+     */
+    case Missing = 'missing';
     case Download = 'download';
     case Render = 'render';
     case Thumbnail = 'thumbnail';
@@ -23,6 +30,7 @@ enum Stage: string
         return match ($this) {
             self::Reserve => 'taking the content',
             self::Metadata => 'reading the content in the archive',
+            self::Missing => 'the source PDF is not on the file store',
             self::Download => 'downloading the PDF',
             self::Render => 'rendering the pages',
             self::Thumbnail => 'making thumbnails',

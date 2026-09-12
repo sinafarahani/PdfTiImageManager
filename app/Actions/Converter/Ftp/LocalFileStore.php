@@ -33,7 +33,9 @@ class LocalFileStore implements FileStore
         $path = $this->path($remotePath);
 
         if (! is_file($path)) {
-            throw FileStoreException::permanent("The file {$path} is not there");
+            // Absent, not merely permanent: the pipeline gives a content whose source file is gone up
+            // at once, and the two stores have to agree about that or the tests prove nothing.
+            throw FileStoreException::absent("The file {$path} is not there");
         }
 
         if (! is_dir(dirname($localPath))) {
