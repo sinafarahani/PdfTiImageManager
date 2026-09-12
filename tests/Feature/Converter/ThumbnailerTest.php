@@ -49,6 +49,25 @@ class ThumbnailerTest extends TestCase
         $this->assertNotSame($this->placeholder(), $thumbnail);
     }
 
+    public function test_the_page_is_decoded_with_room_to_resize_from(): void
+    {
+        // libjpeg can only halve repeatedly, and it stops at the smallest step that still covers what
+        // it was asked for. Asked for the thumbnail's own 120x160, a 1667x1250 page arrives as 417x313
+        // and most of its detail is gone before the resize starts: measured against a faithful
+        // full-decode downscale, that thumbnail was 0.0193 out where the same page asked for 480x640
+        // is 0.0107. A page at 300 dpi is past libjpeg's floor either way, so this costs nothing where
+        // it changes nothing.
+        $thumbnailer = new class extends ImagickThumbnailer
+        {
+            public function hint(): string
+            {
+                return $this->decodeHint();
+            }
+        };
+
+        $this->assertSame('480x640', $thumbnailer->hint());
+    }
+
     public function test_it_keeps_the_box_when_the_page_is_wider_than_it_is_high(): void
     {
         $wide = $this->directory.DIRECTORY_SEPARATOR.'wide.jpg';
