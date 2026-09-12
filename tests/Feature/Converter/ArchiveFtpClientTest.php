@@ -305,6 +305,21 @@ class ArchiveFtpClientTest extends TestCase
         Sleep::assertNeverSlept();
     }
 
+    public function test_a_file_whose_whole_folder_is_gone_is_recognised_too(): void
+    {
+        // The archive's stale rows are not all one missing file: whole day folders are gone, so the
+        // listing that would answer "the file is not there" cannot be had either. The folder is asked
+        // directly then, because nothing can be inside a folder that does not exist.
+        $this->server->failTimes('RETR', 3, 'End');
+        $client = $this->client(['attempts' => 3, 'retry_seconds' => 5]);
+
+        $failure = $this->failureOf(fn () => $client->download('2023/01/17/10/57/21/gone.pdf', $this->workspace.DIRECTORY_SEPARATOR.'gone.pdf'));
+
+        $this->assertTrue($failure->absent);
+        $this->assertSame(1, count(array_filter($this->server->commands(), fn (string $command): bool => str_starts_with($command, 'RETR'))));
+        Sleep::assertNeverSlept();
+    }
+
     public function test_the_same_silent_refusal_is_still_retried_when_the_file_is_there(): void
     {
         // The other half of it: an unreadable refusal for a file the folder does list is the transfer

@@ -239,6 +239,21 @@ class ConvertOneContentTest extends TestCase
         $this->assertSame([], $this->archive->convertedContents());
     }
 
+    public function test_a_failure_names_the_file_it_was_working_on(): void
+    {
+        // "pdf2img exited with 2: the file is not a readable PDF" says nothing anybody can act on. The
+        // workspace copy is deleted by then, so the path on the file store is the only one still worth
+        // having - with it, the PDF can be opened and looked at.
+        $renderer = new FakePageRenderer(failure: new RenderFailed('pdf2img exited with 2: the file is not a readable PDF', exitCode: 2, retryable: false));
+        $conversion = $this->claimedConversion();
+
+        $this->pipeline(renderer: $renderer)->convert($conversion);
+
+        $reason = (string) $conversion->refresh()->failure_reason;
+        $this->assertStringContainsString('not a readable PDF', $reason);
+        $this->assertStringContainsString('2023/02/01/07/43/38/'.self::SOURCE_MVD.'.pdf', $reason);
+    }
+
     public function test_a_content_another_worker_holds_is_put_back_without_touching_the_archive(): void
     {
         $this->archive->reserve(self::CONTENT, 'somebody-else');

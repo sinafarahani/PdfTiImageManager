@@ -54,6 +54,7 @@ class ConvertOneContent
         $contentId = $conversion->content_id;
         $owner = (string) ($conversion->worker ?: 'converter');
         $stage = Stage::Reserve;
+        $sourcePath = null;
 
         try {
             // Nothing in the archive is touched before the row itself says this worker holds the
@@ -106,6 +107,7 @@ class ConvertOneContent
                     }
 
                     $remote = $source->remoteFolder().'/'.$source->remoteFileName();
+                    $sourcePath = $remote;
                     $pdf = $workspace.DIRECTORY_SEPARATOR.$source->remoteFileName();
 
                     try {
@@ -213,7 +215,7 @@ class ConvertOneContent
                 $this->cleanUp($contentId);
             }
         } catch (Throwable $exception) {
-            $this->handleFailure($conversion, $stage, $exception);
+            $this->handleFailure($conversion, $stage, $exception, $sourcePath);
         }
     }
 
@@ -295,7 +297,7 @@ class ConvertOneContent
         }
     }
 
-    private function handleFailure(Conversion $conversion, Stage $stage, Throwable $exception): void
+    private function handleFailure(Conversion $conversion, Stage $stage, Throwable $exception, ?string $sourcePath = null): void
     {
         report($exception);
 
@@ -322,7 +324,13 @@ class ConvertOneContent
             report($rollback);
         }
 
-        $this->giveUp($conversion, $stage, Str::limit($exception->getMessage(), 400), $retryable);
+        // The file is named in the reason, whatever went wrong. "pdf2img exited with 2: the file is
+        // not a readable PDF" says nothing a person can act on; with the path they can open that PDF
+        // on the site and see it for themselves - and the workspace copy is gone by then, so the
+        // remote path is the only one still worth anything.
+        $reason = Str::limit($exception->getMessage(), 340).($sourcePath === null ? '' : "  [source: {$sourcePath}]");
+
+        $this->giveUp($conversion, $stage, $reason, $retryable);
     }
 
     /**

@@ -442,10 +442,15 @@ class ArchiveFtpClient implements FileStore
     {
         $folder = str_contains($path, '/') ? substr($path, 0, (int) strrpos($path, '/')) : '';
 
-        [$entries] = $this->silently(fn (): array|false => ftp_nlist($connection, $folder === '' ? '/' : $folder));
+        $folder = $folder === '' ? '/' : $folder;
+
+        [$entries] = $this->silently(fn (): array|false => ftp_nlist($connection, $folder));
 
         if (! is_array($entries)) {
-            return null;
+            // A listing that failed is not an answer about the file - unless the folder itself is gone,
+            // which the archive's rows also do: a whole day's folder is missing where their files used
+            // to be. Nothing can be inside a folder that is not there, so that is an answer.
+            return $this->folderExists($connection, $folder) === false ? false : null;
         }
 
         $name = strtolower(basename($path));
@@ -466,6 +471,25 @@ class ArchiveFtpClient implements FileStore
      * server's own limits - is worth another attempt. Every path this client sends is absolute, so
      * the working directory a successful CWD leaves behind changes nothing.
      */
+    /**
+     * Whether the server has that folder: true, false, or null when its answer said neither.
+     *
+     * A raw CWD is the one command whose reply code survives ext-ftp, which is what makes it readable
+     * on a server whose refusals arrive with no code at all. Every path this client sends is absolute,
+     * so the working directory a successful CWD leaves behind changes nothing.
+     */
+    private function folderExists(Connection $connection, string $folder): ?bool
+    {
+        [$answer] = $this->silently(fn (): mixed => ftp_raw($connection, "CWD {$folder}"));
+        $code = is_array($answer) ? trim((string) reset($answer)) : '';
+
+        if (str_starts_with($code, '55')) {
+            return false;
+        }
+
+        return str_starts_with($code, '2') ? true : null;
+    }
+
     private function listingFailure(Connection $connection, string $path, string $reply, float $elapsed): FileStoreException
     {
         $message = $this->describe('list', $path, $reply);
