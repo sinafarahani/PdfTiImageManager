@@ -9,6 +9,7 @@ use Illuminate\Database\Connection;
 use Illuminate\Database\ConnectionInterface;
 use PDO;
 use PDOException;
+use Ramsey\Uuid\Uuid;
 use RuntimeException;
 
 /**
@@ -166,9 +167,22 @@ class SqlServerArchive implements ArchiveGateway
         return $this->write(
             'reserve',
             fn (): bool => $this->retryingDeadlocks(
-                fn (): bool => $this->connection->update($sql, [$owner, $contentId, self::RESERVED_FREE]) === 1,
+                fn (): bool => $this->connection->update($sql, [$this->reservationFor($owner), $contentId, self::RESERVED_FREE]) === 1,
             ),
         );
+    }
+
+    /**
+     * The GUID a worker writes into GeneralContent.Reserved to hold a content.
+     *
+     * Reserved is a uniqueidentifier, so a worker's name cannot go in it - SQL Server refuses the
+     * string outright, which is how this was found. A name-based v5 UUID keeps what the name was for:
+     * it is the same value every time, so a reserved row can be traced back to the worker holding it,
+     * and it cannot collide with the archive's own "converted" and "failed" markers.
+     */
+    private function reservationFor(string $owner): string
+    {
+        return (string) Uuid::uuid5(Uuid::NAMESPACE_OID, $owner);
     }
 
     public function release(string $contentId): void

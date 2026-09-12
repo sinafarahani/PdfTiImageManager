@@ -7,6 +7,7 @@ use App\Actions\Converter\Archive\SqlServerArchive;
 use App\Actions\Converter\Archive\StoreMode;
 use Carbon\CarbonImmutable;
 use PDOException;
+use Ramsey\Uuid\Uuid;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -119,10 +120,61 @@ class ArchiveStatementsTest extends TestCase
 
         $this->assertSame('update', $statement['method']);
         $this->assertSame('UPDATE GeneralContent SET Reserved = ? WHERE ID = ? AND Reserved = ?', $statement['sql']);
+
+        // GeneralContent.Reserved is a uniqueidentifier: SQL Server refuses a worker's name outright
+        // ("conversion failed when converting from a character string to uniqueidentifier"), which is
+        // how this was found - on the first real content, after every test here had passed. The name
+        // becomes a v5 UUID, so the same worker still writes the same traceable value every time.
         $this->assertSame(
-            ['worker-3', 'C0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000'],
-            $statement['bindings'],
+            (string) Uuid::uuid5(Uuid::NAMESPACE_OID, 'worker-3'),
+            $statement['bindings'][0],
         );
+        $this->assertSame(
+            ['C0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000'],
+            array_slice($statement['bindings'], 1),
+        );
+    }
+
+    public function test_every_value_bound_to_a_uniqueidentifier_column_is_a_guid(): void
+    {
+        // The class of fault reserve() belonged to: a value that is a string here and a
+        // uniqueidentifier in the archive. SQLite and the fake archive accept anything, so only a real
+        // server complains - and it complains on the first live content, not in this suite.
+        $guid = '/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/';
+        $contentId = 'C0000000-0000-0000-0000-000000000001';
+        $mvdId = 'D0000000-0000-0000-0000-000000000002';
+
+        $writes = [
+            'reserve' => fn (SqlServerArchive $archive) => $archive->reserve($contentId, 'worker-3'),
+            'release' => fn (SqlServerArchive $archive) => $archive->release($contentId),
+            'markConverted' => fn (SqlServerArchive $archive) => $archive->markConverted($contentId),
+            'markFailed' => fn (SqlServerArchive $archive) => $archive->markFailed($contentId),
+            'undoConverted' => fn (SqlServerArchive $archive) => $archive->undoConverted($contentId),
+            'softDeleteSource' => fn (SqlServerArchive $archive) => $archive->softDeleteSource($mvdId),
+            'restoreSource' => fn (SqlServerArchive $archive) => $archive->restoreSource($mvdId),
+            'deletePages' => fn (SqlServerArchive $archive) => $archive->deletePages([$mvdId]),
+        ];
+
+        // deletePages() also binds the format guard that keeps an undo to page images; it is the one
+        // value in these statements that is deliberately not an id.
+        $notAnId = ['image/%'];
+
+        foreach ($writes as $name => $write) {
+            $connection = new RecordingConnection(affected: 1);
+            $write(new SqlServerArchive($connection, 'on'));
+
+            foreach ($connection->onlyStatement()['bindings'] as $position => $binding) {
+                if (in_array((string) $binding, $notAnId, true)) {
+                    continue;
+                }
+
+                $this->assertMatchesRegularExpression(
+                    $guid,
+                    (string) $binding,
+                    "{$name}() binding {$position} is not a GUID, and every other value it binds goes into a uniqueidentifier column",
+                );
+            }
+        }
     }
 
     public function test_reserve_reports_a_content_somebody_else_holds(): void
