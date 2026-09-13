@@ -29,15 +29,33 @@ class ActionTest extends TestCase
         $this->assertFalse(Gate::forUser($user)->allows('start-action'));
     }
 
-    public function test_dashboard_shows_the_converter_status(): void
+    public function test_the_dashboard_is_the_front_page_now(): void
     {
+        // There is no separate dashboard any more - it showed exactly what the front page shows - but
+        // the route stays, because it is where Fortify sends somebody after they sign in.
         $this->withoutVite();
         $this->actingAs(User::factory()->create());
 
-        $response = $this->get('/dashboard');
+        $this->get('/dashboard')->assertRedirect('/');
+
+        $response = $this->get('/');
 
         $response->assertSeeLivewire(Action::class);
         $response->assertSee('Stopped');
+    }
+
+    public function test_a_signed_in_user_gets_the_account_menu_instead_of_a_sign_in_link(): void
+    {
+        $this->withoutVite();
+        $user = User::factory()->create(['name' => 'Sina']);
+        $this->actingAs($user);
+
+        $response = $this->get('/');
+
+        $response->assertSee('Sina');
+        $response->assertSee('Manage Account');
+        $response->assertSee('Log Out');
+        $response->assertDontSee('Sign in');
     }
 
     public function test_anybody_can_watch_the_status_page_without_signing_in(): void

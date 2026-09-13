@@ -36,10 +36,10 @@ class Action extends Component
     /**
      * Live counts from the conversions table.
      *
-     * @var array{waiting: int, converting: int, done: int, missing: int, failed: int, converted_today: int}
+     * @var array{waiting: int, converting: int, done: int, missing: int, skipped: int, failed: int, converted_today: int}
      */
     #[Locked]
-    public array $counts = ['waiting' => 0, 'converting' => 0, 'done' => 0, 'missing' => 0, 'failed' => 0, 'converted_today' => 0];
+    public array $counts = ['waiting' => 0, 'converting' => 0, 'done' => 0, 'missing' => 0, 'skipped' => 0, 'failed' => 0, 'converted_today' => 0];
 
     /**
      * The last few failures, so the step and the reason the pipeline records are actually visible.
@@ -87,7 +87,7 @@ class Action extends Component
     }
 
     /**
-     * @param  array{waiting: int, converting: int, done: int, missing: int, failed: int, converted_today: int}  $counts
+     * @param  array{waiting: int, converting: int, done: int, missing: int, skipped: int, failed: int, converted_today: int}  $counts
      */
     private function showWork(ConversionOverview $overview, array $counts): void
     {

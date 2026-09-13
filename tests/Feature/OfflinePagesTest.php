@@ -23,7 +23,9 @@ class OfflinePagesTest extends TestCase
         if (Features::enabled(Features::registration())) {
             $this->assertLoadsNothingFromOtherHosts($this->get('/register'));
         }
-        $this->assertLoadsNothingFromOtherHosts($this->actingAs(User::factory()->create())->get('/dashboard'));
+        $this->assertLoadsNothingFromOtherHosts($this->get('/'));
+        $this->assertLoadsNothingFromOtherHosts($this->get('/failures'));
+        $this->assertLoadsNothingFromOtherHosts($this->actingAs(User::factory()->create())->get('/'));
     }
 
     private function assertLoadsNothingFromOtherHosts(TestResponse $response): void

@@ -76,6 +76,47 @@ class ConversionOverview
     }
 
     /**
+     * Everything that did not convert, of one kind, newest first - the full list behind the tiles.
+     *
+     * The search is a plain "contains" over the content id and the recorded reason, because the
+     * reason is where the file path is and looking a document up by its path is the whole point of
+     * having the list. It is not indexable and it does not need to be: this is a page somebody opens
+     * to investigate, not something the pipeline runs.
+     *
+     * @return Builder<Conversion>
+     */
+    public function problems(FailureKind $kind, string $search = ''): Builder
+    {
+        $query = $kind->constrain(Conversion::query())->orderByDesc('finished_at')->orderByDesc('id');
+
+        if (($term = trim($search)) !== '') {
+            $like = '%'.str_replace(['%', '_'], ['\%', '\_'], $term).'%';
+
+            $query->where(function (Builder $matching) use ($like): void {
+                $matching->where('content_id', 'like', $like)->orWhere('failure_reason', 'like', $like);
+            });
+        }
+
+        return $query;
+    }
+
+    /**
+     * How many there are of each kind, for the tabs above the list.
+     *
+     * @return array<string, int>
+     */
+    public function problemCounts(): array
+    {
+        $counts = [];
+
+        foreach (FailureKind::cases() as $kind) {
+            $counts[$kind->value] = $kind->constrain(Conversion::query())->count();
+        }
+
+        return $counts;
+    }
+
+    /**
      * The most recent failures, with the step they failed at - the thing the old pipeline's log made
      * impossible to see.
      *
