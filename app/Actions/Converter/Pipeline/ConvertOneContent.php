@@ -281,18 +281,27 @@ class ConvertOneContent
             $mvdIds[] = $stray->mvdId;
         }
 
-        foreach ($conversion->pages()->get() as $page) {
-            if ($page->remote_path !== null) {
-                $this->deleteQuietly($page->remote_path);
-            }
+        // Read in batches rather than all at once: a content can have tens of thousands of pages, and
+        // a rollback that loads every one of them as a model is the one part of this pipeline whose
+        // memory grows with the size of the document it is undoing.
+        $conversion->pages()
+            ->select(['id', 'mvd_id', 'remote_path'])
+            ->chunkById(500, function ($pages) use (&$mvdIds): void {
+                foreach ($pages as $page) {
+                    if ($page->remote_path !== null) {
+                        $this->deleteQuietly($page->remote_path);
+                    }
 
-            if ($page->mvd_id !== null) {
-                $mvdIds[] = $page->mvd_id;
-            }
-        }
+                    if ($page->mvd_id !== null) {
+                        $mvdIds[] = $page->mvd_id;
+                    }
+                }
+            });
 
         if ($mvdIds !== []) {
-            $this->archive->deletePages(array_values(array_unique($mvdIds)));
+            foreach (array_chunk(array_values(array_unique($mvdIds)), 500) as $batch) {
+                $this->archive->deletePages($batch);
+            }
         }
 
         $conversion->pages()->delete();

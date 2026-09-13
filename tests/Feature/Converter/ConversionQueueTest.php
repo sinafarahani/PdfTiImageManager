@@ -9,6 +9,7 @@ use App\Actions\Converter\Pipeline\Stage;
 use App\Models\Conversion;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -255,6 +256,32 @@ class ConversionQueueTest extends TestCase
         $this->expectExceptionMessageMatches('/already recorded as MVDContent MVD-1/');
 
         $this->queue->recordPage($conversion, 1, 'MVD-9');
+    }
+
+    public function test_a_content_may_have_more_than_sixty_five_thousand_pages(): void
+    {
+        // Both counters were smallints. One content in the archive rendered and uploaded 65,535 pages
+        // over eleven hours and then threw "Out of range value for column 'seq'" on the next one, twice.
+        // The two are asserted together on purpose: seq alone would move the overflow to succeed(),
+        // which runs after the archive has been marked converted, and the rollback would then delete
+        // every page of a content the archive believes is finished.
+        $this->queue->add([$this->content('C1')]);
+        $conversion = $this->queue->claim('worker-1', 1)->sole();
+
+        $page = $this->queue->recordPage($conversion, 70_000, 'MVD-70000');
+        $this->assertTrue($this->queue->succeed($conversion, 70_000));
+
+        $this->assertSame(70_000, $page->refresh()->seq);
+        $this->assertSame(70_000, $conversion->refresh()->pages);
+
+        // SQLite does not enforce integer widths, so the round trip above would pass on a smallint
+        // column too. The declared type is what the production MySQL actually holds.
+        foreach ([['conversions', 'pages'], ['conversion_pages', 'seq']] as [$table, $column]) {
+            $declared = collect(Schema::getColumns($table))->firstWhere('name', $column);
+
+            $this->assertNotNull($declared);
+            $this->assertStringNotContainsString('smallint', strtolower((string) $declared['type']), "{$table}.{$column} is still a smallint");
+        }
     }
 
     public function test_missing_names_the_contents_that_did_not_reach_the_queue(): void
