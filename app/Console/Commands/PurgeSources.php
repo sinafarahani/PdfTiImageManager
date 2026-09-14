@@ -54,8 +54,10 @@ class PurgeSources extends Command
      */
     protected $signature = 'converters:purge-sources
         {--content=* : only these content ids}
-        {--limit=500 : most contents in one run}
+        {--limit=0 : most contents in one run, or 0 for every one of them}
+        {--check=500 : contents a rehearsal asks the archive about}
         {--unrecorded : allow contents converted before the panel recorded its sources}
+        {--all-hidden : with --unrecorded, allow contents that have more than one hidden PDF row}
         {--confirm : actually destroy them}';
 
     /**
@@ -100,36 +102,69 @@ class PurgeSources extends Command
 
         $this->finishInterrupted($archive, $store, $confirmed);
 
-        $eligible = $this->eligible();
+        $total = $this->eligible()->count();
 
-        if ($eligible->isEmpty()) {
+        if ($total === 0) {
             $this->components->info('No converted content has a source PDF left to delete.');
 
             return self::SUCCESS;
         }
 
         if (! $confirmed) {
-            $this->rehearse($archive, $eligible);
+            $this->rehearse($archive, $total);
 
             return self::SUCCESS;
         }
 
-        foreach ($eligible as $conversion) {
-            try {
-                $this->purge($archive, $store, $conversion);
-            } catch (Throwable $exception) {
-                // One content that cannot be finished must not take the run down. Whatever was
-                // destroyed is recorded, and finishInterrupted() picks the rest up next time.
-                report($exception);
+        $limit = max(0, (int) $this->option('limit'));
+        $wanted = $limit === 0 ? $total : min($limit, $total);
 
-                $this->components->error("{$conversion->content_id}: {$exception->getMessage()}");
-                $this->refused++;
+        $this->line(sprintf('Destroying the source PDF of %s content(s).', number_format($wanted)));
+        $bar = $this->output->createProgressBar($wanted);
+        $bar->start();
 
-                break;
+        $seen = 0;
+        $stopped = false;
+
+        // Chunked by key rather than loaded in one go: this runs over every converted content in the
+        // archive, and there are tens of thousands of them. Each chunk re-reads the table, and a
+        // content purged in an earlier chunk has dropped out of the query by then.
+        $this->eligible()->chunkById(200, function (Collection $chunk) use ($archive, $store, $bar, $wanted, &$seen, &$stopped): bool {
+            foreach ($chunk as $conversion) {
+                if ($seen >= $wanted) {
+                    return false;
+                }
+
+                try {
+                    $this->purge($archive, $store, $conversion);
+                } catch (Throwable $exception) {
+                    // One content that cannot be finished must not take the run down. Whatever was
+                    // destroyed is recorded, and finishInterrupted() picks the rest up next time.
+                    report($exception);
+
+                    $this->newLine();
+                    $this->components->error("{$conversion->content_id}: {$exception->getMessage()}");
+                    $this->refused++;
+                    $stopped = true;
+
+                    return false;
+                }
+
+                $seen++;
+                $bar->advance();
             }
-        }
+
+            return true;
+        });
+
+        $bar->finish();
+        $this->newLine();
 
         $this->report();
+
+        if ($stopped) {
+            $this->components->warn('The run stopped early. Run it again to carry on from where it left off.');
+        }
 
         return self::SUCCESS;
     }
@@ -167,9 +202,9 @@ class PurgeSources extends Command
     /**
      * Contents this panel converted whose source has not been purged yet, oldest first.
      *
-     * @return Collection<int, Conversion>
+     * @return \Illuminate\Database\Eloquent\Builder<Conversion>
      */
-    private function eligible(): Collection
+    private function eligible()
     {
         $query = Conversion::query()
             ->where('status', ConversionStatus::Done)
@@ -199,7 +234,7 @@ class PurgeSources extends Command
             $query->whereIn('content_id', array_values(array_unique($wanted)));
         }
 
-        return $query->limit(max(1, (int) $this->option('limit')))->get();
+        return $query;
     }
 
     /**
@@ -208,12 +243,17 @@ class PurgeSources extends Command
      *
      * @param  Collection<int, Conversion>  $eligible
      */
-    private function rehearse(ArchiveGateway $archive, Collection $eligible): void
+    private function rehearse(ArchiveGateway $archive, int $total): void
     {
+        // Every content checked costs two questions to the archive, and there can be tens of
+        // thousands of them, so a rehearsal checks a sample and is honest about having done so. The
+        // total comes from one count and is the number that matters.
+        $check = max(1, (int) $this->option('check'));
+        $checked = min($check, $total);
         $ready = 0;
         $shown = 0;
 
-        foreach ($eligible as $conversion) {
+        foreach ($this->eligible()->limit($checked)->get() as $conversion) {
             $sources = $this->destroyable($archive, $conversion);
 
             if ($sources === []) {
@@ -230,12 +270,24 @@ class PurgeSources extends Command
         }
 
         $this->newLine();
+        $this->components->twoColumnDetail('<fg=yellow>converted contents whose source is still there</>', '<fg=yellow>'.number_format($total).'</>');
+        $this->components->twoColumnDetail('of those, asked the archive about', number_format($checked).($checked < $total ? '  (--check raises this)' : ''));
+        $this->components->twoColumnDetail('of those, ready to be destroyed', number_format($ready));
+
+        $this->newLine();
 
         if ($ready > 0) {
+            $limit = max(0, (int) $this->option('limit'));
+
             $this->components->warn(sprintf(
-                '%s content(s) would have their source PDF destroyed. There is no way back from this.',
-                number_format($ready),
+                'A --confirm run would destroy the source PDF of %s content(s). There is no way back from this.',
+                $limit === 0 ? number_format($total) : number_format(min($limit, $total)),
             ));
+
+            if ($checked < $total) {
+                $this->line(sprintf('  Only %s were checked, so the rest may include some it would refuse.', number_format($checked)));
+            }
+
             $this->line('  Run it again with --confirm to do it.');
         } else {
             $this->components->info('Nothing would be destroyed.');
@@ -358,9 +410,14 @@ class PurgeSources extends Command
             return [];
         }
 
-        if (count($hidden) !== 1) {
+        if (count($hidden) !== 1 && ! $this->option('all-hidden')) {
+            // One hidden PDF row is provably the one the conversion hid. Several are not: the
+            // pipeline converts every PDF a content has on show, so they may all be ours - or one of
+            // them may be a revision somebody deleted in the viewer years ago, which was never
+            // rendered and still has no pages. Nothing in the archive distinguishes them, so this
+            // needs saying out loud rather than assuming.
             $this->refuse(
-                'several hidden PDF rows and no record of which one was converted, so none were touched',
+                'several hidden PDF rows and no record of which one was converted; --all-hidden takes them all',
                 sprintf('%s (%d hidden PDF rows)', $conversion->content_id, count($hidden)),
             );
 
@@ -406,6 +463,18 @@ class PurgeSources extends Command
             $this->line('  Those were converted before the panel began recording which source row it hid.');
             $this->line('  --unrecorded allows them, and only where the content has exactly one hidden PDF row,');
             $this->line('  which is then provably the one the conversion hid.');
+        }
+
+        foreach (array_keys($this->refusals) as $reason) {
+            if (str_contains((string) $reason, '--all-hidden')) {
+                $this->newLine();
+                $this->line('  Those contents have more than one hidden PDF row and no record of which was converted.');
+                $this->line('  The pipeline converts every PDF a content has on show, so they are probably all its');
+                $this->line('  sources - but a PDF deleted in the viewer before the conversion looks identical, and');
+                $this->line('  that one was never rendered and has no pages to replace it. --all-hidden destroys them all.');
+
+                break;
+            }
         }
     }
 

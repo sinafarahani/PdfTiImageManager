@@ -336,6 +336,55 @@ class PurgeSourcesTest extends TestCase
         $this->assertSame([self::SOURCE_MVD], $this->archive->hardDeletedSources());
     }
 
+    public function test_all_hidden_takes_every_hidden_pdf_of_the_content(): void
+    {
+        // The pipeline converts every PDF a content has on show, so several hidden rows are probably
+        // all its sources. Probably is not provably, which is why it takes a flag of its own.
+        $this->archive->addSourceFile(self::CONTENT, new SourceFile(
+            mvdId: 'DEADBEEF-0000-0000-0000-00000000000B',
+            seqPageNo: 2,
+            pageNo: 'the-second-pdf.pdf',
+            createDateTime: '2023-02-01 07:43:38',
+            format: 'Application/pdf',
+            ftpSiteId: 1,
+        ));
+        $this->archive->softDeleteSource('DEADBEEF-0000-0000-0000-00000000000B');
+        $this->convertedContent(recordTheSource: false);
+
+        $this->artisan('converters:purge-sources', ['--unrecorded' => true, '--all-hidden' => true, '--confirm' => true])
+            ->expectsOutputToContain('2 archive row(s) destroyed')
+            ->assertSuccessful();
+
+        $this->assertSame([self::SOURCE_MVD, 'DEADBEEF-0000-0000-0000-00000000000B'], $this->archive->hardDeletedSources());
+        $this->assertSame(2, PurgedSource::query()->count());
+    }
+
+    public function test_a_rehearsal_reports_the_whole_queue_and_not_just_what_it_checked(): void
+    {
+        // The first real run reported "500 would be destroyed" because 500 was the batch size, and
+        // read as though that were the whole archive. The total is the number that matters.
+        // Oldest first, so the sample of 2 reaches the one that is ready.
+        $this->convertedContent()->update(['finished_at' => now()->subDay()]);
+
+        foreach (range(1, 4) as $n) {
+            $contentId = "C0C0C0C0-0000-0000-0000-00000000000{$n}";
+            $this->archive->addContent($contentId, profileId: 12);
+            Conversion::query()->create([
+                'content_id' => $contentId,
+                'profile_id' => 12,
+                'status' => ConversionStatus::Done,
+                'pages' => 1,
+                'finished_at' => now(),
+            ]);
+        }
+
+        $this->artisan('converters:purge-sources', ['--check' => 2])
+            ->expectsOutputToContain('converted contents whose source is still there')
+            ->expectsOutputToContain('--check raises this')
+            ->expectsOutputToContain('Only 2 were checked')
+            ->assertSuccessful();
+    }
+
     public function test_unrecorded_still_refuses_when_there_are_two_hidden_pdfs(): void
     {
         $this->archive->addSourceFile(self::CONTENT, new SourceFile(
