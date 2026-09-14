@@ -180,6 +180,40 @@ class PurgeSourcesTest extends TestCase
         }
     }
 
+    public function test_a_content_requeued_after_its_chunk_was_selected_is_left_alone(): void
+    {
+        // The run walks tens of thousands of contents while the converters keep going. A content that
+        // was finished when its chunk was read can be put back in the queue and claimed before the
+        // run reaches it, and its source PDF is what that worker converts from.
+        $conversion = $this->convertedContent();
+
+        // The window itself: the row is Done when the chunk reads it, and a worker has it by the
+        // time the run reaches that content.
+        $taken = false;
+        Conversion::retrieved(function (Conversion $model) use (&$taken, $conversion): void {
+            if (! $taken && $model->getKey() === $conversion->id) {
+                $taken = true;
+
+                Conversion::query()->whereKey($conversion->id)->update([
+                    'status' => ConversionStatus::Claimed->value,
+                    'worker' => 'worker-1',
+                ]);
+            }
+        });
+
+        try {
+            $this->artisan('converters:purge-sources', ['--confirm' => true])
+                ->expectsOutputToContain('no longer finished')
+                ->assertSuccessful();
+        } finally {
+            Conversion::flushEventListeners();
+        }
+
+        $this->assertFileExists($this->sourcePath());
+        $this->assertSame([], $this->archive->hardDeletedSources());
+        $this->assertSame(0, PurgedSource::query()->count());
+    }
+
     public function test_a_content_converted_with_no_pages_recorded_is_never_touched(): void
     {
         $this->convertedContent()->update(['pages' => 0]);

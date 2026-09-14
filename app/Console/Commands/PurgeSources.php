@@ -329,6 +329,24 @@ class PurgeSources extends Command
      */
     private function destroyable(ArchiveGateway $archive, Conversion $conversion): array
     {
+        // Re-read rather than trust the row this chunk was loaded with. The run walks tens of
+        // thousands of contents and takes a while, and the converters are normally running
+        // throughout: a content that was finished when its chunk was selected may since have been
+        // put back in the queue by converters:undo --requeue and claimed by a worker, and its source
+        // is what that worker is about to convert from.
+        $fresh = Conversion::query()->whereKey($conversion->id)->first(['id', 'status', 'pages']);
+
+        if ($fresh === null || $fresh->status !== ConversionStatus::Done) {
+            $this->refuse(
+                'the conversion is no longer finished, so a worker may be converting it right now',
+                $conversion->content_id,
+            );
+
+            return [];
+        }
+
+        $conversion->setAttribute('pages', $fresh->pages);
+
         $hidden = $archive->hiddenSourcesFor($conversion->content_id);
 
         if ($hidden === []) {
