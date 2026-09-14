@@ -66,7 +66,11 @@ class ExplainDiscovery extends Command
 
         $queued = Conversion::query()->count();
 
-        $this->components->twoColumnDetail('<fg=yellow>contents with a PDF, processed before then</>', '<fg=yellow>'.number_format($counts['total']).'</>');
+        // "Still on show" is not a detail. The query counts contents whose PDF row is Deleted = 0,
+        // and converting one hides its source - so a content LEAVES this population the moment it is
+        // converted. Two runs an hour apart show the total falling, and without the label that reads
+        // as the archive shrinking rather than as the pipeline working.
+        $this->components->twoColumnDetail('<fg=yellow>contents whose PDF is still on show, processed before then</>', '<fg=yellow>'.number_format($counts['total']).'</>');
         $this->components->twoColumnDetail('<fg=yellow>of those, discovery would offer</>', '<fg=yellow>'.number_format($counts['offered']).'</>');
 
         $this->newLine();
@@ -89,6 +93,21 @@ class ExplainDiscovery extends Command
         $this->components->twoColumnDetail('the panel\'s queue holds, in total', number_format($queued));
 
         $this->newLine();
+
+        // A converted content whose source is still on show. Ours are hidden the moment they are
+        // converted, so these are the retired pipeline's: it marked the content and left the PDF
+        // where it was. Their files are still taking up the disk and nothing points at them as
+        // originals any more, but converters:purge-sources will not touch them - it requires
+        // Deleted = 1, which is the archive's own statement that the pages took over.
+        if ($counts['converted'] > 0) {
+            $this->line(sprintf(
+                '  %s of those are converted but their PDF is still on show, so the pages and the original are both',
+                number_format($counts['converted']),
+            ));
+            $this->line('  on offer. converters:purge-sources leaves them alone by design: it only touches a source the');
+            $this->line('  archive has already retired with Deleted = 1.');
+            $this->newLine();
+        }
 
         if ($counts['offered'] === 0 && $counts['heldByWorker'] === 0) {
             $this->components->info('Nothing older is being missed.');

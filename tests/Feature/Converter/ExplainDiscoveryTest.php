@@ -63,6 +63,20 @@ class ExplainDiscoveryTest extends TestCase
             ->assertSuccessful();
     }
 
+    public function test_it_points_out_the_converted_contents_whose_pdf_is_still_on_show(): void
+    {
+        // Our own conversions hide the source, so these are the retired pipeline's: the content
+        // marked converted and the PDF left where it was. The purge will not touch them, by design,
+        // and the count is the only place anyone would learn they exist.
+        $this->content('C1', '2022-01-01 10:00:00');
+        $this->archive->markConverted('C1');
+
+        $this->artisan('converters:explain-discovery', ['--before' => '2026-07-29 21:40:14'])
+            ->expectsOutputToContain('converted but their PDF is still on show')
+            ->expectsOutputToContain('only touches a source the')
+            ->assertSuccessful();
+    }
+
     public function test_contents_newer_than_the_date_are_not_counted(): void
     {
         $this->content('C1', '2026-08-01 10:00:00');
