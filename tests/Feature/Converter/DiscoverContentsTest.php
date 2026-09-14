@@ -158,19 +158,19 @@ class DiscoverContentsTest extends TestCase
         // again, so the mark can never move. Production discovery sat on one content for two days.
         config(['converter.discovery.seed_from_pdfconvert' => false]);
 
-        $this->archive->addContent('C1', 1, CarbonImmutable::parse('2026-09-12 08:15:37.123456'));
+        $this->archive->addContent('C1', 1, CarbonImmutable::parse('2026-09-12 08:15:37.123'));
 
         $this->artisan('converters:discover')->assertSuccessful();
 
         // The fraction has to survive being written down, or the next pass asks a question that
         // includes the content it was taken from.
         $this->assertSame(
-            '2026-09-12 08:15:37.123456',
-            CarbonImmutable::parse((string) DB::table('conversion_watermarks')->where('name', 'discovery')->value('processed_until'))->format('Y-m-d H:i:s.u'),
+            '2026-09-12 08:15:37.123',
+            CarbonImmutable::parse((string) DB::table('conversion_watermarks')->where('name', 'discovery')->value('processed_until'))->format('Y-m-d H:i:s.v'),
         );
 
         // The second pass must get past it rather than read it for ever.
-        $this->archive->addContent('C2', 1, CarbonImmutable::parse('2026-09-12 09:00:00.500000'));
+        $this->archive->addContent('C2', 1, CarbonImmutable::parse('2026-09-12 09:00:00.500'));
 
         $this->artisan('converters:discover')
             ->expectsOutputToContain('Queued 1 new content(s)')

@@ -219,7 +219,7 @@ class ArchiveStatementsTest extends TestCase
         // With a fraction on purpose. ProcessDate is a datetime and ticks every 3.33 ms, so a
         // watermark bound as a whole second hands back the content it was taken from on every pass,
         // and the scan wedges there for good - which is exactly what happened in production.
-        (new SqlServerArchive($connection, 'on'))->discover(CarbonImmutable::parse('2025-01-07 16:39:53.123456'), 10);
+        (new SqlServerArchive($connection, 'on'))->discover(CarbonImmutable::parse('2025-01-07 16:39:53.123'), 10);
 
         $expected = <<<'SQL'
             SELECT DISTINCT TOP (?) g.ID, g.ProcessDate, g.ProfileID
@@ -238,7 +238,7 @@ class ArchiveStatementsTest extends TestCase
 
         $this->assertSame($expected, $statement['sql']);
         $this->assertSame(
-            [10, 'application/pdf', '00000000-0000-0000-0000-000000000000', '2025-01-07 16:39:53.123456'],
+            [10, 'application/pdf', '00000000-0000-0000-0000-000000000000', '2025-01-07 16:39:53.123'],
             $statement['bindings'],
         );
     }

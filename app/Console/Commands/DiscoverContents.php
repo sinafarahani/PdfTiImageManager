@@ -263,11 +263,11 @@ class DiscoverContents extends Command
             return false;
         }
 
-        $past = CarbonImmutable::parse($this->lastPass['newest'])->addMicrosecond();
+        $past = CarbonImmutable::parse($this->lastPass['newest'])->addMilliseconds(1);
 
         DB::table('conversion_watermarks')
             ->where('name', self::WATERMARK)
-            ->update(['processed_until' => $past->format('Y-m-d H:i:s.u'), 'updated_at' => now()]);
+            ->update(['processed_until' => $past->format('Y-m-d H:i:s.v'), 'updated_at' => now()]);
 
         $this->warn(sprintf(
             'The watermark could not be moved by the usual comparison, so it was stepped past %s; every content read was already queued.',
@@ -327,7 +327,7 @@ class DiscoverContents extends Command
      */
     private function moved(?CarbonImmutable $from): bool
     {
-        return $this->processedUntil()?->format('Y-m-d H:i:s.u') !== $from?->format('Y-m-d H:i:s.u');
+        return $this->processedUntil()?->format('Y-m-d H:i:s.v') !== $from?->format('Y-m-d H:i:s.v');
     }
 
     /**
@@ -355,7 +355,7 @@ class DiscoverContents extends Command
         $advanceTo = $this->watermarkFor($found, $missing);
 
         $dates = array_values(array_filter(array_map(
-            fn (DiscoveredContent $content): ?string => $content->processDate?->format('Y-m-d H:i:s.u'),
+            fn (DiscoveredContent $content): ?string => $content->processDate?->format('Y-m-d H:i:s.v'),
             $found,
         )));
 
@@ -449,7 +449,7 @@ class DiscoverContents extends Command
         // Kept to the microsecond. Truncating to the second is what wedged the scan: a content
         // processed at 08:15:37.123 was recorded as 08:15:37, came back on the next pass because
         // .123 is later than .000, and truncated to the same second again.
-        $processedUntil = $newest->format('Y-m-d H:i:s.u');
+        $processedUntil = $newest->format('Y-m-d H:i:s.v');
 
         DB::table('conversion_watermarks')
             ->where('name', self::WATERMARK)

@@ -17,8 +17,11 @@ use Illuminate\Support\Facades\Schema;
  * them. On the production archive discovery stopped dead at 2026-09-12 08:15:37 and stayed there,
  * finding the same single content every quarter of an hour and queueing nothing.
  *
- * Microseconds rather than milliseconds so that a datetime2 column, if the archive ever grows one,
- * has room too.
+ * The column takes microseconds, but the values written into it carry three digits, because that is
+ * datetime's own resolution and the most SQL Server will accept in a string compared against one: a
+ * literal with six digits is refused outright with "Conversion failed when converting date and/or
+ * time from character string". The extra room costs nothing and is there if the archive ever grows a
+ * datetime2 column.
  */
 return new class extends Migration
 {

@@ -118,7 +118,11 @@ class SqlServerArchive implements ArchiveGateway
             // With the fraction, not truncated to the second. ProcessDate is a datetime and ticks
             // every 3.33 ms, so asking for "> 08:15:37" hands back the content processed at
             // 08:15:37.123 on every pass for ever and the caller's watermark can never get past it.
-            $bindings[] = $processedAfter->format('Y-m-d H:i:s.u');
+            //
+            // Three digits exactly, which is datetime's own resolution. SQL Server converts this
+            // literal to the column's type, and a datetime refuses a string carrying more than three
+            // - "Conversion failed when converting date and/or time from character string".
+            $bindings[] = $processedAfter->format('Y-m-d H:i:s.v');
         }
 
         // Oldest first, and g.ID as the tie-breaker: ProcessDate is a datetime with a 3.33 ms tick and
