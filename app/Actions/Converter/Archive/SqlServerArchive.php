@@ -270,6 +270,9 @@ class SqlServerArchive implements ArchiveGateway
                 COUNT(*) AS total,
                 SUM(CASE WHEN RenderMediaId = 1 THEN 1 ELSE 0 END) AS converted,
                 SUM(CASE WHEN Reserved <> ? THEN 1 ELSE 0 END) AS reserved,
+                SUM(CASE WHEN Reserved = ? THEN 1 ELSE 0 END) AS convertedMarker,
+                SUM(CASE WHEN Reserved = ? THEN 1 ELSE 0 END) AS failedMarker,
+                SUM(CASE WHEN Reserved NOT IN (?, ?, ?) THEN 1 ELSE 0 END) AS heldByWorker,
                 SUM(CASE WHEN FS3dIndexItemCountThresholdStatus = 1 THEN 1 ELSE 0 END) AS threshold,
                 SUM(CASE
                     WHEN RenderMediaId <> 1
@@ -288,6 +291,11 @@ class SqlServerArchive implements ArchiveGateway
 
         $row = $this->connection->selectOne($sql, [
             self::RESERVED_FREE,
+            self::RESERVED_CONVERTED,
+            self::RESERVED_FAILED,
+            self::RESERVED_FREE,
+            self::RESERVED_CONVERTED,
+            self::RESERVED_FAILED,
             self::RESERVED_FREE,
             self::FORMAT_PDF,
             $before->format('Y-m-d H:i:s.v'),
@@ -297,6 +305,9 @@ class SqlServerArchive implements ArchiveGateway
             'total' => (int) ($row->total ?? 0),
             'converted' => (int) ($row->converted ?? 0),
             'reserved' => (int) ($row->reserved ?? 0),
+            'convertedMarker' => (int) ($row->convertedMarker ?? 0),
+            'failedMarker' => (int) ($row->failedMarker ?? 0),
+            'heldByWorker' => (int) ($row->heldByWorker ?? 0),
             'threshold' => (int) ($row->threshold ?? 0),
             'offered' => (int) ($row->offered ?? 0),
         ];

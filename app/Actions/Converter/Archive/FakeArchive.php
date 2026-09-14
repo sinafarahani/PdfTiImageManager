@@ -307,7 +307,7 @@ class FakeArchive implements ArchiveGateway
     }
 
     /**
-     * @return array{total: int, converted: int, reserved: int, threshold: int, offered: int}
+     * @return array{total: int, converted: int, reserved: int, convertedMarker: int, failedMarker: int, heldByWorker: int, threshold: int, offered: int}
      */
     public function discoveryBreakdown(CarbonImmutable $before): array
     {
@@ -345,8 +345,13 @@ class FakeArchive implements ArchiveGateway
         return [
             'total' => $total,
             'converted' => $converted,
-            'reserved' => $reserved,
-            'threshold' => 0,
+            // A converted content carries the converted marker, so it is reserved as well - which is
+            // exactly the overlap the real counts have and the reason they are reported apart.
+            'reserved' => $converted + $reserved,
+            'convertedMarker' => $converted,
+            'failedMarker' => 0,
+            'heldByWorker' => $reserved,
+            'threshold' => $converted,
             'offered' => $offered,
         ];
     }

@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Actions\Converter\Archive\ArchiveGateway;
+use App\Models\Conversion;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
 use Throwable;
@@ -63,15 +64,33 @@ class ExplainDiscovery extends Command
             return self::SUCCESS;
         }
 
+        $queued = Conversion::query()->count();
+
         $this->components->twoColumnDetail('<fg=yellow>contents with a PDF, processed before then</>', '<fg=yellow>'.number_format($counts['total']).'</>');
-        $this->components->twoColumnDetail('already converted (RenderMediaId = 1)', $this->share($counts['converted'], $counts['total']));
-        $this->components->twoColumnDetail('reserved by somebody (Reserved is not free)', $this->share($counts['reserved'], $counts['total']));
-        $this->components->twoColumnDetail('held by the index threshold flag', $this->share($counts['threshold'], $counts['total']));
-        $this->components->twoColumnDetail('<fg=yellow>discovery would offer these</>', '<fg=yellow>'.number_format($counts['offered']).'</>');
+        $this->components->twoColumnDetail('<fg=yellow>of those, discovery would offer</>', '<fg=yellow>'.number_format($counts['offered']).'</>');
+
+        $this->newLine();
+        $this->line('  The rest, and why the archive is holding them back:');
+
+        // Reported apart because they overlap almost exactly, and reporting them as three shares of
+        // the total invites the reading that they are three separate populations. markConverted()
+        // writes all three at once - RenderMediaId = 1, the converted marker, and the threshold bit -
+        // so on a healthy archive these are three views of the same contents.
+        $this->components->twoColumnDetail('    converted (RenderMediaId = 1)', number_format($counts['converted']));
+        $this->components->twoColumnDetail('    carrying the archive\'s "converted" marker', number_format($counts['convertedMarker']));
+        $this->components->twoColumnDetail('    carrying the "failed" marker', number_format($counts['failedMarker']));
+        $this->components->twoColumnDetail('    held by the index threshold flag', number_format($counts['threshold']));
+        $this->components->twoColumnDetail(
+            '    <fg=red>reserved by a worker that is not coming back</>',
+            '<fg=red>'.number_format($counts['heldByWorker']).'</>',
+        );
+
+        $this->newLine();
+        $this->components->twoColumnDetail('the panel\'s queue holds, in total', number_format($queued));
 
         $this->newLine();
 
-        if ($counts['offered'] === 0 && $counts['reserved'] === 0) {
+        if ($counts['offered'] === 0 && $counts['heldByWorker'] === 0) {
             $this->components->info('Nothing older is being missed.');
             $this->line('  Every content processed before that date is already converted, so discovery starting where');
             $this->line('  it does is the archive\'s own history rather than a blind spot.');
@@ -82,26 +101,38 @@ class ExplainDiscovery extends Command
         }
 
         if ($counts['offered'] > 0) {
+            // Deliberately not "discovery has not seen them". The archive offering a content says
+            // nothing about whether the panel already has it: a content sits in the queue as Pending
+            // for as long as it takes to convert, and the archive goes on offering it that whole
+            // time. The two numbers together are the only honest reading.
             $this->components->warn(sprintf(
-                '%s content(s) older than that date would be offered, so discovery has not seen them.',
+                'The archive would offer %s content(s) processed before that date.',
                 number_format($counts['offered']),
             ));
-            $this->line('  Run `php artisan converters:discover --all --restart` to walk the archive from the beginning.');
+            $this->line(sprintf(
+                '  That is work still to do, not work that has been missed: a content stays offerable until it is'
+                    .PHP_EOL.'  converted, and the panel\'s queue already holds %s.',
+                number_format($queued),
+            ));
+            $this->line('  If the two are close, discovery has them all. If the archive\'s number is much larger,');
+            $this->line('  `php artisan converters:discover --all --restart` walks the archive from the beginning');
+            $this->line('  and queues whatever is not there - it queues nothing that already is.');
             $this->newLine();
         }
 
         // Counted as missed in its own right, and not folded into the line above. A reserved content
         // is not waiting to be discovered - it cannot be discovered, by this pipeline or any other,
         // until somebody puts the marker back. Rescanning the archive for ever would never find one.
-        if ($counts['reserved'] > 0) {
+        if ($counts['heldByWorker'] > 0) {
             $this->components->warn(sprintf(
-                '%s content(s) older than that date are reserved, and no scan can ever offer those.',
-                number_format($counts['reserved']),
+                '%s content(s) are held by a worker GUID, and no scan can ever offer those.',
+                number_format($counts['heldByWorker']),
             ));
-            $this->line('  GeneralContent.Reserved is both the lock and the verdict, and the retired C# pipeline left');
-            $this->line('  its dead workers\' GUIDs in it. A content held that way is invisible to discovery for good.');
-            $this->line('  `php artisan converters:retry` frees the ones this panel already has a row for; the rest');
-            $this->line('  need the marker clearing in the archive before anything will pick them up.');
+            $this->line('  GeneralContent.Reserved is both the lock and the verdict. These carry neither the converted');
+            $this->line('  marker nor the failed one, so they are not a verdict about anything - they are contents a');
+            $this->line('  worker took and never gave back, and the retired C# pipeline left them by the thousand.');
+            $this->line('  A content held that way is invisible to discovery for good.');
+            $this->line('  `php artisan converters:retry` frees the ones this panel already has a row for.');
         }
 
         return self::SUCCESS;

@@ -92,7 +92,7 @@ interface ArchiveGateway
      * One pass over the join, and an expensive one on a 93 million row table. It is a diagnostic
      * somebody runs when they doubt the coverage, not something on a schedule.
      *
-     * @return array{total: int, converted: int, reserved: int, threshold: int, offered: int}
+     * @return array{total: int, converted: int, reserved: int, convertedMarker: int, failedMarker: int, heldByWorker: int, threshold: int, offered: int}
      */
     public function discoveryBreakdown(CarbonImmutable $before): array;
 

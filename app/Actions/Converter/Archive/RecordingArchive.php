@@ -211,7 +211,7 @@ class RecordingArchive implements ArchiveGateway
     }
 
     /**
-     * @return array{total: int, converted: int, reserved: int, threshold: int, offered: int}
+     * @return array{total: int, converted: int, reserved: int, convertedMarker: int, failedMarker: int, heldByWorker: int, threshold: int, offered: int}
      */
     public function discoveryBreakdown(CarbonImmutable $before): array
     {

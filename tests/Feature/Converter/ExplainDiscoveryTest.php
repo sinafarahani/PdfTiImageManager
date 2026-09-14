@@ -45,7 +45,7 @@ class ExplainDiscoveryTest extends TestCase
         $this->content('C2', '2023-05-05 10:00:00');
 
         $this->artisan('converters:explain-discovery', ['--before' => '2026-07-29 21:40:14'])
-            ->expectsOutputToContain('1 content(s) older than that date would be offered')
+            ->expectsOutputToContain('The archive would offer 1 content(s) processed before that date')
             ->expectsOutputToContain('--all --restart')
             ->assertSuccessful();
     }
@@ -58,7 +58,7 @@ class ExplainDiscoveryTest extends TestCase
         $this->archive->reserve('C1', 'a-worker-that-died');
 
         $this->artisan('converters:explain-discovery', ['--before' => '2026-07-29 21:40:14'])
-            ->expectsOutputToContain('reserved by somebody')
+            ->expectsOutputToContain('reserved by a worker that is not coming back')
             ->expectsOutputToContain('converters:retry')
             ->assertSuccessful();
     }
