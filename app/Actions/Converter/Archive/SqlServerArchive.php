@@ -329,6 +329,31 @@ class SqlServerArchive implements ArchiveGateway
         );
     }
 
+    public function contentsWithLivePages(array $contentIds): array
+    {
+        $found = [];
+
+        // Chunked for the same reason deletePages is: SQL Server refuses a statement with more than
+        // 2100 parameters.
+        foreach (array_chunk(array_values(array_unique($contentIds)), self::MAX_IDS_PER_DELETE) as $chunk) {
+            $placeholders = implode(', ', array_fill(0, count($chunk), '?'));
+
+            $sql = <<<SQL
+                SELECT DISTINCT ContentID
+                FROM MVDContent
+                WHERE Format LIKE ?
+                  AND Deleted = 0
+                  AND ContentID IN ({$placeholders})
+                SQL;
+
+            foreach ($this->connection->select($sql, array_merge([self::FORMAT_IMAGE_LIKE], $chunk)) as $row) {
+                $found[] = self::text($row->ContentID);
+            }
+        }
+
+        return $found;
+    }
+
     public function sourceRowExists(string $mvdId): bool
     {
         // Deleted is not filtered on purpose: the question is whether the row is there at all.

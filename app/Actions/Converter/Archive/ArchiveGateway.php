@@ -72,6 +72,18 @@ interface ArchiveGateway
     public function livePageIdsFor(string $contentId): array;
 
     /**
+     * Which of these contents have at least one page image on show, asked once for the whole batch.
+     *
+     * livePageIdsFor() answers for one content, which is the wrong shape for a walk of MVDContent:
+     * asking it per row turns a scan of millions of rows into millions of round trips to a server on
+     * another machine, and the walk appears to hang.
+     *
+     * @param  list<string>  $contentIds
+     * @return list<string>
+     */
+    public function contentsWithLivePages(array $contentIds): array;
+
+    /**
      * Whether an MVDContent row exists at all, hidden or not.
      *
      * For deciding what an interrupted destructive run actually managed to do. It cannot be answered

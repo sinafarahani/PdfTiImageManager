@@ -264,13 +264,20 @@ class PurgeSources extends Command
                 break;
             }
 
+            // Asked once for the whole page. Per row this is a round trip to a server on another
+            // machine for every one of millions of rows, which is why a --check=0 rehearsal looked
+            // like it had hung.
+            $withPages = array_flip($archive->contentsWithLivePages(array_values(array_filter(
+                array_map(fn (SourceFile $source): string => (string) ($source->contentId ?? ''), $page),
+            ))));
+
             foreach ($page as $source) {
                 $examined++;
                 $after = $source->mvdId;
 
                 $contentId = (string) ($source->contentId ?? '');
 
-                if ($contentId === '' || $archive->livePageIdsFor($contentId) === []) {
+                if ($contentId === '' || ! isset($withPages[$contentId])) {
                     // No pages on show means this source is all there is of the document, whatever
                     // its flag says. That is the state the old pipeline left 10,601 contents in.
                     $this->refuse('the archive has no page images on show for this content', $contentId ?: $source->mvdId);
@@ -294,6 +301,16 @@ class PurgeSources extends Command
             if ($confirmed) {
                 $this->rememberCursor(self::WALK, (string) $after);
             }
+
+            // A walk of MVDContent is hours of work. Without a line per page it prints ten examples
+            // and then nothing at all, which is indistinguishable from having hung.
+            $this->line(sprintf(
+                '  %s row(s) examined, %s %s, %s left alone',
+                number_format($examined),
+                number_format($this->rowsDestroyed),
+                $confirmed ? 'destroyed' : 'would be destroyed',
+                number_format(array_sum(array_column($this->refusals, 'count'))),
+            ));
         }
 
         $this->newLine();

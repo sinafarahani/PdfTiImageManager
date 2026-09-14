@@ -202,6 +202,38 @@ class ArchiveStatementsTest extends TestCase
         $this->assertSame([500, 65, '%pdf%'], $statement['bindings']);
     }
 
+    public function test_the_live_page_check_asks_once_for_a_whole_batch(): void
+    {
+        // Per content this is a round trip to another machine for every one of millions of rows, and
+        // the walk that uses it looks like it has hung. One statement per batch instead.
+        $connection = new RecordingConnection;
+
+        (new SqlServerArchive($connection, 'on'))->contentsWithLivePages([
+            'A1B2C3D4-0000-0000-0000-000000000001',
+            'B1B2C3D4-0000-0000-0000-000000000002',
+
+            // Repeated on purpose: a batch of source rows can hold several of one content.
+            'A1B2C3D4-0000-0000-0000-000000000001',
+        ]);
+
+        $expected = <<<'SQL'
+            SELECT DISTINCT ContentID
+            FROM MVDContent
+            WHERE Format LIKE ?
+              AND Deleted = 0
+              AND ContentID IN (?, ?)
+            SQL;
+
+        $statement = $connection->onlyStatement();
+
+        $this->assertSame('select', $statement['method']);
+        $this->assertSame($expected, $statement['sql']);
+        $this->assertSame(
+            ['image/%', 'A1B2C3D4-0000-0000-0000-000000000001', 'B1B2C3D4-0000-0000-0000-000000000002'],
+            $statement['bindings'],
+        );
+    }
+
     public function test_hard_delete_source_is_refused_unless_writes_are_on(): void
     {
         $connection = new RecordingConnection;

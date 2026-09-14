@@ -372,6 +372,18 @@ class FakeArchive implements ArchiveGateway
         return $live;
     }
 
+    /**
+     * @param  list<string>  $contentIds
+     * @return list<string>
+     */
+    public function contentsWithLivePages(array $contentIds): array
+    {
+        return array_values(array_filter(
+            array_unique($contentIds),
+            fn (string $contentId): bool => $this->livePageIdsFor($contentId) !== [],
+        ));
+    }
+
     public function sourceRowExists(string $mvdId): bool
     {
         if (isset($this->pages[$mvdId])) {

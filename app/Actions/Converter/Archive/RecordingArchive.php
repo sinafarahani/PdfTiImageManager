@@ -226,6 +226,15 @@ class RecordingArchive implements ArchiveGateway
         return $this->archive->livePageIdsFor($contentId);
     }
 
+    /**
+     * @param  list<string>  $contentIds
+     * @return list<string>
+     */
+    public function contentsWithLivePages(array $contentIds): array
+    {
+        return $this->archive->contentsWithLivePages($contentIds);
+    }
+
     public function sourceRowExists(string $mvdId): bool
     {
         return $this->archive->sourceRowExists($mvdId);
