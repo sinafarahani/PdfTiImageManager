@@ -32,7 +32,8 @@ class DiscoverContents extends Command
      */
     protected $signature = 'converters:discover
         {--batch= : Contents to pull in one pass (default: converter.discovery.batch)}
-        {--all : Keep passing until the archive has nothing left to offer, instead of stopping after one}';
+        {--all : Keep passing until the archive has nothing left to offer, instead of stopping after one}
+        {--restart : Forget how far the scan has come and walk the archive from the beginning}';
 
     /**
      * @var string
@@ -91,6 +92,10 @@ class DiscoverContents extends Command
             return self::FAILURE;
         }
 
+        if ($this->option('restart')) {
+            $this->restart();
+        }
+
         try {
             if (! $this->seeded() && (bool) config('converter.discovery.seed_from_pdfconvert')) {
                 $this->seed($archive, $queue, $batch);
@@ -124,7 +129,40 @@ class DiscoverContents extends Command
             Conversion::query()->count(),
         ));
 
+        // Queueing nothing is the ordinary outcome of a scan that has caught up, and it looks exactly
+        // like a scan that is broken. Say which, because the difference is the whole question.
+        if ($this->added === 0 && $this->dropped === 0) {
+            $this->line(sprintf(
+                '  Nothing new: the archive has no unconverted content with a ProcessDate after %s.',
+                $this->processedUntil()?->format('Y-m-d H:i:s.v') ?? 'the beginning of the scan',
+            ));
+            $this->line('  The queue already holds everything the archive has offered up to that point.');
+            $this->line('  To re-read the archive from the beginning and prove nothing was missed:');
+            $this->line('      php artisan converters:discover --all --restart');
+        }
+
         return $this->dropped === 0 ? self::SUCCESS : self::FAILURE;
+    }
+
+    /**
+     * Puts the watermark back to the beginning so the next scan walks the whole archive.
+     *
+     * The answer to "has discovery actually seen everything?", which the watermark alone cannot give:
+     * it says how far the scan has come, not whether anything was missed on the way. Re-reading the
+     * archive from the start settles it, and costs nothing but time - add() ignores every content
+     * already queued, so a rescan of ground already covered queues nothing and changes nothing.
+     *
+     * The one thing it gives up is the position. If this is interrupted the next pass, scheduled or
+     * not, starts from the beginning as well and has to walk back up - slow, but it loses nothing.
+     */
+    private function restart(): void
+    {
+        DB::table('conversion_watermarks')
+            ->where('name', self::WATERMARK)
+            ->update(['processed_until' => null, 'updated_at' => now()]);
+
+        $this->components->warn('The watermark has been put back to the beginning; this scan starts from the oldest content in the archive.');
+        $this->line('  Nothing already queued is queued again, so this only costs time.');
     }
 
     /**
@@ -204,7 +242,9 @@ class DiscoverContents extends Command
                 $pass,
                 number_format($found),
                 number_format($this->added),
-                $this->processedUntil()?->format('Y-m-d H:i:s') ?? 'the beginning',
+                // With the fraction. Without it two passes that really did move the mark - from
+                // 08:15:37.000 to 08:15:37.123 - print the same line twice and read as a stall.
+                $this->processedUntil()?->format('Y-m-d H:i:s.v') ?? 'the beginning',
             ));
 
             if ($this->dropped > 0) {

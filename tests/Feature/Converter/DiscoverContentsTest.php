@@ -195,6 +195,46 @@ class DiscoverContentsTest extends TestCase
         $this->assertSame(2, Conversion::query()->count());
     }
 
+    public function test_restart_walks_the_archive_again_from_the_beginning(): void
+    {
+        // The answer to "has discovery actually seen everything?". The watermark says how far the
+        // scan has come, not whether anything was missed on the way, and only re-reading settles it.
+        config(['converter.discovery.seed_from_pdfconvert' => false]);
+
+        $this->archive->addContent('C1', 1, CarbonImmutable::parse('2025-01-07 16:39:53.123'));
+        $this->artisan('converters:discover')->assertSuccessful();
+        $this->assertSame('2025-01-07 16:39:53', $this->watermark());
+
+        // A content older than the mark, which an ordinary pass can never look back far enough to see.
+        $this->archive->addContent('C0', 1, CarbonImmutable::parse('2020-01-01 08:00:00'));
+
+        $this->artisan('converters:discover', ['--all' => true])
+            ->expectsOutputToContain('Queued 0 new content(s)')
+            ->assertSuccessful();
+
+        $this->artisan('converters:discover', ['--all' => true, '--restart' => true])
+            ->expectsOutputToContain('put back to the beginning')
+            ->expectsOutputToContain('Queued 1 new content(s)')
+            ->assertSuccessful();
+
+        $this->assertSame(['C1', 'C0'], Conversion::query()->orderBy('id')->pluck('content_id')->all());
+    }
+
+    public function test_queueing_nothing_says_whether_that_means_caught_up_or_broken(): void
+    {
+        // "Queued 0 new content(s)" is the ordinary outcome of a scan that has caught up and looks
+        // exactly like one that is wedged. The difference is the whole question being asked.
+        config(['converter.discovery.seed_from_pdfconvert' => false]);
+
+        $this->archive->addContent('C1', 1, CarbonImmutable::parse('2025-01-07 16:39:53.123'));
+        $this->artisan('converters:discover')->assertSuccessful();
+
+        $this->artisan('converters:discover', ['--all' => true])
+            ->expectsOutputToContain('Nothing new: the archive has no unconverted content with a ProcessDate after')
+            ->expectsOutputToContain('--all --restart')
+            ->assertSuccessful();
+    }
+
     public function test_a_pass_that_finds_nothing_keeps_the_watermark_and_the_queue(): void
     {
         config(['converter.discovery.seed_from_pdfconvert' => false]);
