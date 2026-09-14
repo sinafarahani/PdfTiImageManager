@@ -211,6 +211,14 @@ class RecordingArchive implements ArchiveGateway
     }
 
     /**
+     * @return array{total: int, converted: int, reserved: int, threshold: int, offered: int}
+     */
+    public function discoveryBreakdown(CarbonImmutable $before): array
+    {
+        return $this->archive->discoveryBreakdown($before);
+    }
+
+    /**
      * @return list<string>
      */
     public function livePageIdsFor(string $contentId): array

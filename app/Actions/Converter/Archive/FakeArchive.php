@@ -19,6 +19,9 @@ class FakeArchive implements ArchiveGateway
     /** @var array<string, DiscoveredContent> */
     private array $contents = [];
 
+    /** @var array<string, DiscoveredContent> every content ever added, including converted ones */
+    private array $everyContent = [];
+
     /** @var list<DiscoveredContent> */
     private array $legacyQueue = [];
 
@@ -68,6 +71,11 @@ class FakeArchive implements ArchiveGateway
     public function addContent(string $contentId, ?int $profileId = 1, ?CarbonImmutable $processDate = null): self
     {
         $this->contents[$contentId] = new DiscoveredContent($contentId, $profileId, $processDate);
+
+        // Kept apart because finish() removes a content from $contents once it is converted - that is
+        // how the fake models a content discovery will not offer again. GeneralContent keeps the row,
+        // so anything counting what the archive holds has to keep it too.
+        $this->everyContent[$contentId] = $this->contents[$contentId];
 
         return $this;
     }
@@ -296,6 +304,51 @@ class FakeArchive implements ArchiveGateway
     public function softDeleteSource(string $mvdId): void
     {
         $this->softDeleted[] = $mvdId;
+    }
+
+    /**
+     * @return array{total: int, converted: int, reserved: int, threshold: int, offered: int}
+     */
+    public function discoveryBreakdown(CarbonImmutable $before): array
+    {
+        $total = 0;
+        $converted = 0;
+        $reserved = 0;
+        $offered = 0;
+
+        foreach ($this->everyContent as $contentId => $content) {
+            if ($content->processDate === null || ! $content->processDate->lessThan($before)) {
+                continue;
+            }
+
+            if (array_filter($this->sourceFiles[$contentId] ?? [], fn (SourceFile $f): bool => $f->isPdf()) === []) {
+                continue;
+            }
+
+            $total++;
+
+            if (in_array($contentId, $this->converted, true)) {
+                $converted++;
+
+                continue;
+            }
+
+            if (isset($this->reservations[$contentId])) {
+                $reserved++;
+
+                continue;
+            }
+
+            $offered++;
+        }
+
+        return [
+            'total' => $total,
+            'converted' => $converted,
+            'reserved' => $reserved,
+            'threshold' => 0,
+            'offered' => $offered,
+        ];
     }
 
     /**

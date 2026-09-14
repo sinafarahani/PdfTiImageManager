@@ -80,6 +80,22 @@ interface ArchiveGateway
      */
     public function sourceRowExists(string $mvdId): bool;
 
+    /**
+     * Why the contents older than $before are not being offered for conversion.
+     *
+     * Discovery orders by ProcessDate and takes the oldest that still need converting, so where it
+     * starts is a fact about the archive rather than about the scan - but "the oldest work is from
+     * July" and "the scan cannot see anything before July" look identical from outside. This counts
+     * the older contents against each of discovery's own conditions and says which one accounts for
+     * them.
+     *
+     * One pass over the join, and an expensive one on a 93 million row table. It is a diagnostic
+     * somebody runs when they doubt the coverage, not something on a schedule.
+     *
+     * @return array{total: int, converted: int, reserved: int, threshold: int, offered: int}
+     */
+    public function discoveryBreakdown(CarbonImmutable $before): array;
+
     public function profileIdFor(string $contentId): ?int;
 
     public function storeModeFor(int $profileId): StoreMode;

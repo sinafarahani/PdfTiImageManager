@@ -261,6 +261,47 @@ class SqlServerArchive implements ArchiveGateway
         return $this->sourceFiles($sql, [$contentId, self::FORMAT_IMAGE_LIKE]);
     }
 
+    public function discoveryBreakdown(CarbonImmutable $before): array
+    {
+        // DISTINCT in the inner query for the same reason discover() has it: a content with several
+        // PDF rows would otherwise be counted once per row.
+        $sql = <<<'SQL'
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN RenderMediaId = 1 THEN 1 ELSE 0 END) AS converted,
+                SUM(CASE WHEN Reserved <> ? THEN 1 ELSE 0 END) AS reserved,
+                SUM(CASE WHEN FS3dIndexItemCountThresholdStatus = 1 THEN 1 ELSE 0 END) AS threshold,
+                SUM(CASE
+                    WHEN RenderMediaId <> 1
+                     AND Reserved = ?
+                     AND (FS3dIndexItemCountThresholdStatus = 0 OR FS3dIndexItemCountThresholdStatus IS NULL)
+                    THEN 1 ELSE 0 END) AS offered
+            FROM (
+                SELECT DISTINCT g.ID, g.RenderMediaId, g.Reserved, g.FS3dIndexItemCountThresholdStatus
+                FROM GeneralContent g
+                INNER JOIN MVDContent cf ON g.ID = cf.ContentID
+                WHERE cf.Format = ?
+                  AND cf.Deleted = 0
+                  AND g.ProcessDate < ?
+            ) c
+            SQL;
+
+        $row = $this->connection->selectOne($sql, [
+            self::RESERVED_FREE,
+            self::RESERVED_FREE,
+            self::FORMAT_PDF,
+            $before->format('Y-m-d H:i:s.v'),
+        ]);
+
+        return [
+            'total' => (int) ($row->total ?? 0),
+            'converted' => (int) ($row->converted ?? 0),
+            'reserved' => (int) ($row->reserved ?? 0),
+            'threshold' => (int) ($row->threshold ?? 0),
+            'offered' => (int) ($row->offered ?? 0),
+        ];
+    }
+
     public function livePageIdsFor(string $contentId): array
     {
         $sql = <<<'SQL'
