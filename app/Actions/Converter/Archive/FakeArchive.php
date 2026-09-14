@@ -331,6 +331,102 @@ class FakeArchive implements ArchiveGateway
         return false;
     }
 
+    /**
+     * @return list<SourceFile>
+     */
+    public function hiddenSourcesAfter(?string $afterMvdId, int $limit): array
+    {
+        $found = [];
+
+        foreach ($this->sourceFiles as $contentId => $files) {
+            foreach ($files as $file) {
+                if ($file->isPdf() && in_array($file->mvdId, $this->softDeleted, true)) {
+                    $found[] = $this->withContentId($file, (string) $contentId);
+                }
+            }
+        }
+
+        return $this->page($found, $afterMvdId, $limit);
+    }
+
+    /**
+     * @return list<SourceFile>
+     */
+    public function profileSourcesAfter(int $profileId, ?string $afterMvdId, int $limit): array
+    {
+        $found = [];
+
+        foreach ($this->sourceFiles as $contentId => $files) {
+            if (($this->contents[$contentId]->profileId ?? null) !== $profileId) {
+                continue;
+            }
+
+            foreach ($files as $file) {
+                if ($file->isPdf()) {
+                    $found[] = $this->withContentId($file, (string) $contentId);
+                }
+            }
+        }
+
+        return $this->page($found, $afterMvdId, $limit);
+    }
+
+    public function deleteProfileSource(string $mvdId, int $profileId): bool
+    {
+        // Mirrors the real statement: a PDF row of THIS profile, whatever its Deleted flag says.
+        foreach ($this->sourceFiles as $contentId => $files) {
+            if (($this->contents[$contentId]->profileId ?? null) !== $profileId) {
+                continue;
+            }
+
+            foreach ($files as $file) {
+                if ($file->mvdId !== $mvdId || ! $file->isPdf()) {
+                    continue;
+                }
+
+                $this->sourceFiles[$contentId] = array_values(array_filter(
+                    $files,
+                    fn (SourceFile $other): bool => $other->mvdId !== $mvdId,
+                ));
+
+                $this->softDeleted = array_values(array_diff($this->softDeleted, [$mvdId]));
+                $this->hardDeleted[] = $mvdId;
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function withContentId(SourceFile $file, string $contentId): SourceFile
+    {
+        return new SourceFile(
+            $file->mvdId,
+            $file->seqPageNo,
+            $file->pageNo,
+            $file->createDateTime,
+            $file->format,
+            $file->ftpSiteId,
+            $contentId,
+        );
+    }
+
+    /**
+     * @param  list<SourceFile>  $found
+     * @return list<SourceFile>
+     */
+    private function page(array $found, ?string $afterMvdId, int $limit): array
+    {
+        usort($found, fn (SourceFile $a, SourceFile $b): int => strcmp($a->mvdId, $b->mvdId));
+
+        if ($afterMvdId !== null) {
+            $found = array_values(array_filter($found, fn (SourceFile $f): bool => strcmp($f->mvdId, $afterMvdId) > 0));
+        }
+
+        return array_slice($found, 0, max(1, $limit));
+    }
+
     public function hardDeleteSource(string $mvdId): bool
     {
         // The real statement can only match a row that is both a PDF and already hidden, so the fake

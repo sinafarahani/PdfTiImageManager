@@ -15,6 +15,14 @@ final readonly class SourceFile
         public string $createDateTime,
         public string $format,
         public ?int $ftpSiteId,
+
+        /**
+         * The content this row belongs to, when it was read without knowing it already. The queries
+         * that ask for one content's rows leave it null - the caller has it in hand - and the ones
+         * that page through the archive fill it in, because a row found that way is the only thing
+         * that says which document it is part of.
+         */
+        public ?string $contentId = null,
     ) {}
 
     public function isPdf(): bool

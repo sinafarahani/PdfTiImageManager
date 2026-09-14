@@ -121,6 +121,87 @@ class ArchiveStatementsTest extends TestCase
         $this->assertSame(['8E3C2A40-0000-0000-0000-000000000001', '%pdf%'], $statement['bindings']);
     }
 
+    public function test_delete_profile_source_can_only_reach_one_profiles_pdf_rows(): void
+    {
+        // This is the one statement that gives up the Deleted = 1 seat belt, because the rows it is
+        // for were never converted and so were never flagged. The profile takes its place, and it has
+        // to be IN the statement: a join on GeneralContent means a row of any other profile is not
+        // reachable by this call whatever id is passed in. The Format guard stays, so a page image is
+        // still unreachable and ImageLayer and ThumbLayer cannot be cascaded away by mistake.
+        $connection = new RecordingConnection;
+
+        (new SqlServerArchive($connection, 'on'))->deleteProfileSource('8E3C2A40-0000-0000-0000-000000000001', 65);
+
+        $expected = <<<'SQL'
+            DELETE m
+            FROM MVDContent m
+            INNER JOIN GeneralContent g ON g.ID = m.ContentID
+            WHERE m.ID = ?
+              AND m.Format LIKE ?
+              AND g.ProfileID = ?
+            SQL;
+
+        $statement = $connection->onlyStatement();
+
+        $this->assertSame('delete', $statement['method']);
+        $this->assertSame($expected, $statement['sql']);
+        $this->assertSame(['8E3C2A40-0000-0000-0000-000000000001', '%pdf%', 65], $statement['bindings']);
+    }
+
+    public function test_delete_profile_source_is_refused_unless_writes_are_on(): void
+    {
+        $connection = new RecordingConnection;
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessageMatches('/deleteProfileSource/');
+
+        (new SqlServerArchive($connection, 'off'))->deleteProfileSource('8E3C2A40-0000-0000-0000-000000000001', 65);
+    }
+
+    public function test_the_archive_walks_hidden_pdf_rows_in_clustered_key_order(): void
+    {
+        $connection = new RecordingConnection;
+
+        (new SqlServerArchive($connection, 'on'))->hiddenSourcesAfter('8E3C2A40-0000-0000-0000-000000000001', 500);
+
+        $expected = <<<'SQL'
+            SELECT TOP (?) ID, ContentID, SeqPageNo, PageNo, CreateDateTime, Format, FtpSiteID
+            FROM MVDContent
+            WHERE Deleted = 1
+              AND Format LIKE ?
+              AND ID > ?
+            ORDER BY ID
+            SQL;
+
+        $statement = $connection->onlyStatement();
+
+        $this->assertSame($expected, $statement['sql']);
+        $this->assertSame([500, '%pdf%', '8E3C2A40-0000-0000-0000-000000000001'], $statement['bindings']);
+    }
+
+    public function test_a_profile_walk_reads_its_rows_whether_or_not_they_are_flagged_deleted(): void
+    {
+        // Deleted is deliberately absent: the rows this walk is for were never converted, so nothing
+        // ever flagged them, and filtering on it would find none of them.
+        $connection = new RecordingConnection;
+
+        (new SqlServerArchive($connection, 'on'))->profileSourcesAfter(65, null, 500);
+
+        $expected = <<<'SQL'
+            SELECT TOP (?) m.ID, m.ContentID, m.SeqPageNo, m.PageNo, m.CreateDateTime, m.Format, m.FtpSiteID
+            FROM MVDContent m
+            INNER JOIN GeneralContent g ON g.ID = m.ContentID
+            WHERE g.ProfileID = ?
+              AND m.Format LIKE ?
+            ORDER BY m.ID
+            SQL;
+
+        $statement = $connection->onlyStatement();
+
+        $this->assertSame($expected, $statement['sql']);
+        $this->assertSame([500, 65, '%pdf%'], $statement['bindings']);
+    }
+
     public function test_hard_delete_source_is_refused_unless_writes_are_on(): void
     {
         $connection = new RecordingConnection;

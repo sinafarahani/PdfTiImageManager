@@ -6,6 +6,7 @@ use App\Actions\Converter\Archive\ArchiveGateway;
 use App\Actions\Converter\Archive\SourceFile;
 use App\Actions\Converter\Ftp\FileStore;
 use App\Actions\Converter\Ftp\FileStoreException;
+use App\Console\Commands\Concerns\WalksTheArchive;
 use App\Models\Conversion;
 use App\Models\PurgedSource;
 use Illuminate\Console\Command;
@@ -38,13 +39,17 @@ use Throwable;
  */
 class PruneOrphans extends Command
 {
+    use WalksTheArchive;
+
     /**
      * @var string
      */
     protected $signature = 'converters:prune-orphans
         {--content=* : only these content ids}
-        {--limit=0 : most contents in one run, or 0 for every one of them}
-        {--check=500 : contents a rehearsal examines, or 0 for every one of them}
+        {--archive : walk MVDContent itself instead of the panel\'s queue, so contents the old C# pipeline converted are covered too}
+        {--restart : start an --archive walk again from the beginning}
+        {--limit=0 : most rows or contents in one run, or 0 for every one of them}
+        {--check=500 : rows or contents a rehearsal examines, or 0 for every one of them}
         {--confirm : actually delete the rows}';
 
     /**
@@ -53,10 +58,9 @@ class PruneOrphans extends Command
     protected $description = 'Remove archive source rows whose PDF file was deleted long ago';
 
     /**
-     * Contents between one health probe of the file store and the next. A store that goes down
-     * mid-run must not be able to turn the rest of the run into a sweep of good rows.
+     * The row in conversion_watermarks that remembers how far an --archive walk has come.
      */
-    private const PROBE_EVERY = 250;
+    private const WALK = 'prune-orphans';
 
     private int $rowsDeleted = 0;
 
@@ -81,6 +85,10 @@ class PruneOrphans extends Command
 
         if (! $this->storeIsUp($store)) {
             return self::FAILURE;
+        }
+
+        if ($this->option('archive')) {
+            return $this->walkTheArchive($archive, $store, $confirmed);
         }
 
         $total = $this->candidates()->count();
@@ -157,6 +165,136 @@ class PruneOrphans extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Pages through MVDContent's own hidden PDF rows rather than the panel's queue.
+     *
+     * The queue only ever held contents that needed converting, so it cannot see the millions the
+     * retired C# pipeline converted years ago - and those are where the oldest rows whose files have
+     * since been deleted by hand are. There is no count to show first: counting them would itself be
+     * a full pass, so this reports as it goes and remembers where it stopped.
+     */
+    private function walkTheArchive(ArchiveGateway $archive, FileStore $store, bool $confirmed): int
+    {
+        if ($this->option('restart')) {
+            $this->forgetCursor(self::WALK);
+        }
+
+        $budget = max(0, (int) $this->option($confirmed ? 'limit' : 'check'));
+        $after = $this->cursor(self::WALK);
+
+        $this->line(sprintf(
+            '%s MVDContent for hidden source rows whose file is gone%s.',
+            $confirmed ? 'Walking' : 'Rehearsing over',
+            $after === null ? ' (from the beginning)' : ", carrying on after {$after}",
+        ));
+
+        if (! $confirmed && $budget > 0) {
+            $this->line(sprintf('  Stopping after %s row(s); --check=0 walks all of them.', number_format($budget)));
+        }
+
+        $stopped = false;
+
+        while ($budget === 0 || $this->checked < $budget) {
+            $page = $archive->hiddenSourcesAfter($after, $budget === 0 ? 500 : min(500, $budget - $this->checked));
+
+            if ($page === []) {
+                if ($confirmed) {
+                    // The far end. Clearing the cursor means the next run starts over, which is what
+                    // somebody asking for this again months later wants.
+                    $this->forgetCursor(self::WALK);
+                }
+
+                break;
+            }
+
+            foreach ($page as $source) {
+                if ($this->checked > 0 && $this->checked % self::PROBE_EVERY === 0 && ! $this->storeIsUp($store, quiet: true)) {
+                    $this->components->error('The file store stopped answering, so the walk was stopped before it could mistake that for deleted files.');
+                    $stopped = true;
+
+                    break 2;
+                }
+
+                $this->examineRow($archive, $store, $source, $confirmed);
+                $this->checked++;
+                $after = $source->mvdId;
+            }
+
+            if ($confirmed) {
+                $this->rememberCursor(self::WALK, (string) $after);
+            }
+
+            $this->line(sprintf(
+                '  %s row(s) examined, %s removed, %s still have their file',
+                number_format($this->checked),
+                number_format($this->rowsDeleted),
+                number_format($this->filesStillThere),
+            ));
+        }
+
+        $this->newLine();
+        $this->components->twoColumnDetail('hidden source rows examined', number_format($this->checked));
+        $this->components->twoColumnDetail(
+            $confirmed ? '<fg=yellow>source rows removed</>' : '<fg=yellow>source rows that would be removed</>',
+            '<fg=yellow>'.number_format($this->rowsDeleted).'</>',
+        );
+        $this->components->twoColumnDetail('rows whose file is still there', number_format($this->filesStillThere));
+
+        if ($this->unreadable > 0) {
+            $this->components->twoColumnDetail('rows the store would not answer for', number_format($this->unreadable));
+        }
+
+        $this->newLine();
+
+        if (! $confirmed) {
+            $this->components->warn(sprintf('%s row(s) would be removed. Their files are already gone.', number_format($this->rowsDeleted)));
+            $this->line('  Run it again with --confirm to do it. Nothing was remembered, so it starts from the same place.');
+        } else {
+            $this->components->info(sprintf('%s orphaned source row(s) removed.', number_format($this->rowsDeleted)));
+            $this->line('  Where it got to is remembered; run it again to carry on, or --restart to begin again.');
+        }
+
+        if ($stopped) {
+            $this->components->warn('The walk stopped early.');
+        }
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * One hidden source row found by walking the archive.
+     */
+    private function examineRow(ArchiveGateway $archive, FileStore $store, SourceFile $source, bool $confirmed): void
+    {
+        $remotePath = $source->remoteFolder().'/'.$source->remoteFileName();
+
+        try {
+            $size = $store->size($remotePath);
+        } catch (FileStoreException) {
+            $this->unreadable++;
+
+            return;
+        }
+
+        if ($size !== null) {
+            $this->filesStillThere++;
+
+            return;
+        }
+
+        if (! $confirmed) {
+            if ($this->rowsDeleted < 10) {
+                $this->line(sprintf('    %s  %s', $source->contentId ?? '(unknown content)', $remotePath));
+            }
+
+            $this->rowsDeleted++;
+
+            return;
+        }
+
+        $this->removeRow($archive, $source, $remotePath);
     }
 
     /**
@@ -258,6 +396,40 @@ class PruneOrphans extends Command
         }
     }
 
+    /**
+     * The same removal, for a row found by walking the archive rather than through a conversion.
+     */
+    private function removeRow(ArchiveGateway $archive, SourceFile $source, string $remotePath): void
+    {
+        $record = PurgedSource::query()->updateOrCreate(['mvd_id' => $source->mvdId], [
+            'content_id' => (string) ($source->contentId ?? ''),
+            'reason' => PurgedSource::ORPHANED,
+            'conversion_id' => null,
+            'remote_path' => $remotePath,
+            'original_name' => $source->pageNo,
+            'create_date_time' => $source->createDateTime,
+            'bytes' => null,
+            'file_deleted' => true,
+        ]);
+
+        try {
+            $deleted = $archive->hardDeleteSource($source->mvdId);
+        } catch (Throwable $exception) {
+            $record->delete();
+
+            throw $exception;
+        }
+
+        if (! $deleted) {
+            $record->delete();
+
+            return;
+        }
+
+        $record->update(['row_deleted' => true]);
+        $this->rowsDeleted++;
+    }
+
     private function remove(ArchiveGateway $archive, Conversion $conversion, SourceFile $source, string $remotePath): void
     {
         // Written down first, as with a purge. It is a smaller loss - the file was already gone - but
@@ -299,22 +471,6 @@ class PruneOrphans extends Command
      * Everything this command does rests on "the file is not there" meaning what it says, and a store
      * that is unreachable says exactly the same thing about every file on it.
      */
-    private function storeIsUp(FileStore $store, bool $quiet = false): bool
-    {
-        try {
-            $store->list('');
-        } catch (Throwable $exception) {
-            if (! $quiet) {
-                $this->components->error('The file store could not be read, so nothing was touched: '.$exception->getMessage());
-                $this->line('  Every file would look deleted, and this command would take the archive apart.');
-            }
-
-            return false;
-        }
-
-        return true;
-    }
-
     private function report(bool $confirmed, int $total): void
     {
         $this->newLine();
@@ -366,14 +522,5 @@ class PruneOrphans extends Command
         if ($this->unreadable > 0) {
             $this->line('  The ones the store would not answer for were left alone; run it again and it will ask about them.');
         }
-    }
-
-    private function writesAreOn(): bool
-    {
-        return in_array(
-            strtolower(trim((string) config('converter.archive.write_mode'))),
-            ['on', 'true', '1', 'yes', 'enabled'],
-            true,
-        );
     }
 }

@@ -223,6 +223,29 @@ class RecordingArchive implements ArchiveGateway
         return $this->archive->sourceRowExists($mvdId);
     }
 
+    /**
+     * @return list<SourceFile>
+     */
+    public function hiddenSourcesAfter(?string $afterMvdId, int $limit): array
+    {
+        return $this->archive->hiddenSourcesAfter($afterMvdId, $limit);
+    }
+
+    /**
+     * @return list<SourceFile>
+     */
+    public function profileSourcesAfter(int $profileId, ?string $afterMvdId, int $limit): array
+    {
+        return $this->archive->profileSourcesAfter($profileId, $afterMvdId, $limit);
+    }
+
+    public function deleteProfileSource(string $mvdId, int $profileId): bool
+    {
+        $this->record('deleteProfileSource', ['mvdId' => $mvdId, 'profileId' => $profileId]);
+
+        return true;
+    }
+
     public function hardDeleteSource(string $mvdId): bool
     {
         $this->record('hardDeleteSource', ['mvdId' => $mvdId]);

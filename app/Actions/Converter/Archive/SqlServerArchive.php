@@ -445,6 +445,76 @@ class SqlServerArchive implements ArchiveGateway
         );
     }
 
+    public function hiddenSourcesAfter(?string $afterMvdId, int $limit): array
+    {
+        // ID is the clustered key, so ordering and paging on it is a forward walk of the table rather
+        // than a sort. Deleted and Format are almost certainly not indexed on a 140 million row table,
+        // and that is fine: the whole run is one ordered pass, not a scan per page.
+        $sql = <<<'SQL'
+            SELECT TOP (?) ID, ContentID, SeqPageNo, PageNo, CreateDateTime, Format, FtpSiteID
+            FROM MVDContent
+            WHERE Deleted = 1
+              AND Format LIKE ?
+            SQL;
+
+        $bindings = [$limit, self::FORMAT_PDF_LIKE];
+
+        if ($afterMvdId !== null) {
+            $sql .= "\n  AND ID > ?";
+            $bindings[] = $afterMvdId;
+        }
+
+        $sql .= "\nORDER BY ID";
+
+        return $this->sourceFiles($sql, $bindings, withContentId: true);
+    }
+
+    public function profileSourcesAfter(int $profileId, ?string $afterMvdId, int $limit): array
+    {
+        // Deleted is deliberately not filtered: the rows this is for were never converted, so nothing
+        // ever flagged them.
+        $sql = <<<'SQL'
+            SELECT TOP (?) m.ID, m.ContentID, m.SeqPageNo, m.PageNo, m.CreateDateTime, m.Format, m.FtpSiteID
+            FROM MVDContent m
+            INNER JOIN GeneralContent g ON g.ID = m.ContentID
+            WHERE g.ProfileID = ?
+              AND m.Format LIKE ?
+            SQL;
+
+        $bindings = [$limit, $profileId, self::FORMAT_PDF_LIKE];
+
+        if ($afterMvdId !== null) {
+            $sql .= "\n  AND m.ID > ?";
+            $bindings[] = $afterMvdId;
+        }
+
+        $sql .= "\nORDER BY m.ID";
+
+        return $this->sourceFiles($sql, $bindings, withContentId: true);
+    }
+
+    public function deleteProfileSource(string $mvdId, int $profileId): bool
+    {
+        // This one cannot use Deleted = 1 as its seat belt, because the rows it is for were never
+        // converted and so were never flagged. The profile takes its place, and it is a stronger
+        // guard: the join means a row belonging to any other profile is not reachable by this
+        // statement at all, whatever id is passed in. The Format guard stays, so a page image is
+        // still unreachable and ImageLayer and ThumbLayer cannot be cascaded away by mistake.
+        $sql = <<<'SQL'
+            DELETE m
+            FROM MVDContent m
+            INNER JOIN GeneralContent g ON g.ID = m.ContentID
+            WHERE m.ID = ?
+              AND m.Format LIKE ?
+              AND g.ProfileID = ?
+            SQL;
+
+        return $this->write(
+            'deleteProfileSource',
+            fn (): bool => $this->connection->delete($sql, [$mvdId, self::FORMAT_PDF_LIKE, $profileId]) > 0,
+        );
+    }
+
     public function hardDeleteSource(string $mvdId): bool
     {
         // Both guards are in the statement rather than only in the caller's query, and for the same
@@ -666,7 +736,7 @@ class SqlServerArchive implements ArchiveGateway
      * @param  list<mixed>  $bindings
      * @return list<SourceFile>
      */
-    private function sourceFiles(string $sql, array $bindings): array
+    private function sourceFiles(string $sql, array $bindings, bool $withContentId = false): array
     {
         return array_map(
             // PageNo is char(200) and arrives padded to its full width, which would turn a page's
@@ -678,6 +748,7 @@ class SqlServerArchive implements ArchiveGateway
                 self::text($row->CreateDateTime),
                 self::text($row->Format),
                 $row->FtpSiteID === null ? null : (int) $row->FtpSiteID,
+                $withContentId ? self::text($row->ContentID) : null,
             ),
             $this->connection->select($sql, $bindings),
         );

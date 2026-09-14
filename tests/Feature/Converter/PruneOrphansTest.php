@@ -13,6 +13,7 @@ use App\Actions\Converter\Pipeline\Stage;
 use App\Models\Conversion;
 use App\Models\PurgedSource;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Tests\TestCase;
 
@@ -179,6 +180,66 @@ class PruneOrphansTest extends TestCase
             ->expectsOutputToContain('5 of 5')
             ->doesntExpectOutputToContain('--check raises this')
             ->assertSuccessful();
+    }
+
+    public function test_the_archive_walk_reaches_rows_the_panel_never_queued(): void
+    {
+        // The point of --archive. The panel's queue only ever held contents that needed converting,
+        // so the millions the retired C# pipeline converted are not in it - and that is where the
+        // oldest rows whose files were deleted by hand are.
+        $this->archive->addContent('C0FFEE00-0000-0000-0000-000000000009', profileId: 12);
+        $this->archive->addSourceFile('C0FFEE00-0000-0000-0000-000000000009', new SourceFile(
+            mvdId: 'FEEDFACE-0000-0000-0000-000000000009',
+            seqPageNo: 1,
+            pageNo: 'converted-by-the-old-app.pdf',
+            createDateTime: '2019-03-03 03:03:03',
+            format: 'Application/pdf',
+            ftpSiteId: 1,
+        ));
+        $this->archive->softDeleteSource('FEEDFACE-0000-0000-0000-000000000009');
+
+        // Nothing in the panel's own tables knows this content exists.
+        $this->assertSame(0, Conversion::query()->count());
+
+        $this->artisan('converters:prune-orphans', ['--confirm' => true])
+            ->expectsOutputToContain('There are no contents to look at.')
+            ->assertSuccessful();
+
+        $this->assertSame([], $this->archive->hardDeletedSources());
+
+        $this->artisan('converters:prune-orphans', ['--archive' => true, '--confirm' => true])
+            ->expectsOutputToContain('1 orphaned source row(s) removed')
+            ->assertSuccessful();
+
+        $this->assertSame(['FEEDFACE-0000-0000-0000-000000000009'], $this->archive->hardDeletedSources());
+        $this->assertSame('C0FFEE00-0000-0000-0000-000000000009', PurgedSource::query()->sole()->content_id);
+    }
+
+    public function test_the_archive_walk_carries_on_where_it_stopped(): void
+    {
+        foreach (range(1, 4) as $n) {
+            $contentId = "D0D0D0D0-0000-0000-0000-00000000000{$n}";
+            $mvdId = "A000000{$n}-0000-0000-0000-000000000000";
+            $this->archive->addContent($contentId, profileId: 12);
+            $this->archive->addSourceFile($contentId, new SourceFile(
+                mvdId: $mvdId, seqPageNo: 1, pageNo: 'gone.pdf',
+                createDateTime: '2019-03-03 03:03:03', format: 'Application/pdf', ftpSiteId: 1,
+            ));
+            $this->archive->softDeleteSource($mvdId);
+        }
+
+        $this->artisan('converters:prune-orphans', ['--archive' => true, '--limit' => 2, '--confirm' => true])
+            ->assertSuccessful();
+
+        $this->assertCount(2, $this->archive->hardDeletedSources());
+        $this->assertSame('A0000002-0000-0000-0000-000000000000', DB::table('conversion_watermarks')->where('name', 'prune-orphans')->value('cursor'));
+
+        // The second run picks up the remaining two rather than starting over.
+        $this->artisan('converters:prune-orphans', ['--archive' => true, '--confirm' => true])
+            ->assertSuccessful();
+
+        $this->assertCount(4, $this->archive->hardDeletedSources());
+        $this->assertNull(DB::table('conversion_watermarks')->where('name', 'prune-orphans')->value('cursor'));
     }
 
     public function test_it_does_nothing_without_confirm(): void

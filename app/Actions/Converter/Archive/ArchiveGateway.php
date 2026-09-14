@@ -158,6 +158,41 @@ interface ArchiveGateway
     public function hardDeleteSource(string $mvdId): bool;
 
     /**
+     * Hidden source PDF rows read straight from the archive, in ID order, starting after $afterMvdId.
+     *
+     * The panel's own queue only ever held contents that needed converting, so it cannot see the
+     * millions the retired C# pipeline converted years ago - and those are exactly where the oldest
+     * rows whose files have since been deleted by hand are. This walks MVDContent itself instead.
+     *
+     * ID is the clustered key and defaults to newsequentialid(), so paging on it resumes where the
+     * last page stopped and the whole run costs one ordered pass rather than a scan per page.
+     *
+     * @return list<SourceFile>
+     */
+    public function hiddenSourcesAfter(?string $afterMvdId, int $limit): array;
+
+    /**
+     * Every source PDF row of one profile, hidden or not, in ID order, starting after $afterMvdId.
+     *
+     * For a profile whose documents were removed wholesale: its rows were never converted, so nothing
+     * ever flagged them, and Deleted = 0 is the state they are stuck in.
+     *
+     * @return list<SourceFile>
+     */
+    public function profileSourcesAfter(int $profileId, ?string $afterMvdId, int $limit): array;
+
+    /**
+     * Removes a source PDF row of one named profile, whatever its Deleted flag says, and reports
+     * whether there was one to remove.
+     *
+     * Separate from hardDeleteSource() because it gives up that method's Deleted = 1 seat belt, and
+     * that seat belt is most of what makes deleting from MVDContent safe. What replaces it is the
+     * profile: the statement joins GeneralContent and matches on ProfileID, so a row belonging to any
+     * other profile cannot be deleted by this call however it is used.
+     */
+    public function deleteProfileSource(string $mvdId, int $profileId): bool;
+
+    /**
      * Takes a content back to "not converted": the marker, the viewable flags and the threshold bit
      * that markConverted() set, so discovery can offer it again. Everything markConverted writes,
      * written back.
