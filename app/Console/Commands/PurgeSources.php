@@ -73,6 +73,17 @@ class PurgeSources extends Command
 
     private int $orphaned = 0;
 
+    /**
+     * Why contents were left alone, counted per reason.
+     *
+     * Grouped rather than printed one by one: a first run against a queue converted before any of
+     * this existed refuses every content for the same reason, and five hundred identical warnings
+     * say less than one line with a number in front of it.
+     *
+     * @var array<string, array{count: int, example: string}>
+     */
+    private array $refusals = [];
+
     public function handle(ArchiveGateway $archive, FileStore $store): int
     {
         $confirmed = (bool) $this->option('confirm');
@@ -146,8 +157,11 @@ class PurgeSources extends Command
         }
 
         if ($this->refused > 0) {
-            $this->components->warn(sprintf('%s content(s) were left alone. Nothing about them was changed.', number_format($this->refused)));
+            $this->components->warn(sprintf('%s content(s) stopped the run. Nothing about them was changed.', number_format($this->refused)));
         }
+
+        $this->newLine();
+        $this->reportRefusals();
     }
 
     /**
@@ -200,11 +214,9 @@ class PurgeSources extends Command
         $shown = 0;
 
         foreach ($eligible as $conversion) {
-            $sources = $this->destroyable($archive, $conversion, quiet: true);
+            $sources = $this->destroyable($archive, $conversion);
 
             if ($sources === []) {
-                $this->refused++;
-
                 continue;
             }
 
@@ -218,16 +230,19 @@ class PurgeSources extends Command
         }
 
         $this->newLine();
-        $this->components->warn(sprintf(
-            '%s content(s) would have their source PDF destroyed. There is no way back from this.',
-            number_format($ready),
-        ));
 
-        if ($this->refused > 0) {
-            $this->line(sprintf('  %s content(s) would be left alone.', number_format($this->refused)));
+        if ($ready > 0) {
+            $this->components->warn(sprintf(
+                '%s content(s) would have their source PDF destroyed. There is no way back from this.',
+                number_format($ready),
+            ));
+            $this->line('  Run it again with --confirm to do it.');
+        } else {
+            $this->components->info('Nothing would be destroyed.');
         }
 
-        $this->line('  Run it again with --confirm to do it.');
+        $this->newLine();
+        $this->reportRefusals();
     }
 
     /**
@@ -238,8 +253,6 @@ class PurgeSources extends Command
         $sources = $this->destroyable($archive, $conversion);
 
         if ($sources === []) {
-            $this->refused++;
-
             return;
         }
 
@@ -262,11 +275,16 @@ class PurgeSources extends Command
      *
      * @return list<SourceFile>
      */
-    private function destroyable(ArchiveGateway $archive, Conversion $conversion, bool $quiet = false): array
+    private function destroyable(ArchiveGateway $archive, Conversion $conversion): array
     {
         $hidden = $archive->hiddenSourcesFor($conversion->content_id);
 
         if ($hidden === []) {
+            $this->refuse(
+                'the archive has no hidden PDF row for this content, so there is no converted source to delete',
+                $conversion->content_id,
+            );
+
             return [];
         }
 
@@ -277,12 +295,10 @@ class PurgeSources extends Command
         $recorded = (int) $conversion->pages;
 
         if (count($live) < $recorded) {
-            $this->refuse($quiet, sprintf(
-                '%s: the archive shows %d page image(s) and this conversion recorded %d, so its source PDF was left alone.',
-                $conversion->content_id,
-                count($live),
-                $recorded,
-            ));
+            $this->refuse(
+                'fewer page images are on show in the archive than the conversion recorded',
+                sprintf('%s (%d on show, %d recorded)', $conversion->content_id, count($live), $recorded),
+            );
 
             return [];
         }
@@ -293,16 +309,15 @@ class PurgeSources extends Command
         $missing = array_diff($ours, $live);
 
         if ($missing !== []) {
-            $this->refuse($quiet, sprintf(
-                '%s: %d page row(s) this conversion wrote are no longer in the archive, so its source PDF was left alone.',
-                $conversion->content_id,
-                count($missing),
-            ));
+            $this->refuse(
+                'page rows this conversion wrote are no longer in the archive',
+                sprintf('%s (%d of %d gone)', $conversion->content_id, count($missing), count($ours)),
+            );
 
             return [];
         }
 
-        return $this->onlyOurs($conversion, $hidden, $quiet);
+        return $this->onlyOurs($conversion, $hidden);
     }
 
     /**
@@ -311,7 +326,7 @@ class PurgeSources extends Command
      * @param  list<SourceFile>  $hidden
      * @return list<SourceFile>
      */
-    private function onlyOurs(Conversion $conversion, array $hidden, bool $quiet): array
+    private function onlyOurs(Conversion $conversion, array $hidden): array
     {
         $recorded = ConversionSource::query()
             ->where('content_id', $conversion->content_id)
@@ -319,30 +334,35 @@ class PurgeSources extends Command
             ->all();
 
         if ($recorded !== []) {
-            return array_values(array_filter(
+            $ours = array_values(array_filter(
                 $hidden,
                 fn (SourceFile $source): bool => in_array($source->mvdId, $recorded, true),
             ));
+
+            if ($ours === []) {
+                $this->refuse(
+                    'the source rows this conversion hid are no longer in the archive',
+                    $conversion->content_id,
+                );
+            }
+
+            return $ours;
         }
 
         // Converted before the panel started recording its sources. One hidden PDF row is provably
         // the one the conversion hid, because a conversion always hides its own; more than one and
         // there is no way to tell ours from a revision somebody deleted in the viewer years ago.
         if (! $this->option('unrecorded')) {
-            $this->refuse($quiet, sprintf(
-                '%s: converted before the panel recorded which source it hid; --unrecorded allows it.',
-                $conversion->content_id,
-            ));
+            $this->refuse(self::NOT_RECORDED, $conversion->content_id);
 
             return [];
         }
 
         if (count($hidden) !== 1) {
-            $this->refuse($quiet, sprintf(
-                '%s: has %d hidden PDF row(s) and no record of which one it converted, so none of them were touched.',
-                $conversion->content_id,
-                count($hidden),
-            ));
+            $this->refuse(
+                'several hidden PDF rows and no record of which one was converted, so none were touched',
+                sprintf('%s (%d hidden PDF rows)', $conversion->content_id, count($hidden)),
+            );
 
             return [];
         }
@@ -350,12 +370,49 @@ class PurgeSources extends Command
         return $hidden;
     }
 
-    private function refuse(bool $quiet, string $message): void
+    /**
+     * Records why one content was left alone. $reason is the shared explanation; $example names the
+     * content, so a reason that applies to one row can still be chased.
+     */
+    private function refuse(string $reason, string $example): void
     {
-        if (! $quiet) {
-            $this->components->warn($message);
+        $this->refusals[$reason] ??= ['count' => 0, 'example' => $example];
+        $this->refusals[$reason]['count']++;
+    }
+
+    /**
+     * The reasons, commonest first. This is the part that turns "0 would be destroyed" from a dead
+     * end into something to act on.
+     */
+    private function reportRefusals(): void
+    {
+        if ($this->refusals === []) {
+            return;
+        }
+
+        uasort($this->refusals, fn (array $a, array $b): int => $b['count'] <=> $a['count']);
+
+        $total = array_sum(array_column($this->refusals, 'count'));
+
+        $this->line(sprintf('  %s content(s) were left alone:', number_format($total)));
+
+        foreach ($this->refusals as $reason => $refusal) {
+            $this->line(sprintf('      %6s  %s', number_format($refusal['count']), $reason));
+            $this->line(sprintf('              e.g. %s', $refusal['example']));
+        }
+
+        if (isset($this->refusals[self::NOT_RECORDED]) && ! $this->option('unrecorded')) {
+            $this->newLine();
+            $this->line('  Those were converted before the panel began recording which source row it hid.');
+            $this->line('  --unrecorded allows them, and only where the content has exactly one hidden PDF row,');
+            $this->line('  which is then provably the one the conversion hid.');
         }
     }
+
+    /**
+     * The one refusal that has a remedy, so it is worth naming.
+     */
+    private const NOT_RECORDED = 'converted before the panel recorded which source row it hid';
 
     /**
      * Record, then the archive row, then the file. Returns whether the row was destroyed.

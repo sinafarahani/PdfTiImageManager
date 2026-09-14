@@ -77,6 +77,42 @@ class PurgeSourcesTest extends TestCase
         $this->assertSame(0, PurgedSource::query()->count());
     }
 
+    public function test_a_rehearsal_that_would_destroy_nothing_says_why_and_what_to_do(): void
+    {
+        // The first run against a queue converted before any of this existed refuses every content
+        // for the same reason. Reporting "0 would be destroyed" and nothing else leaves the operator
+        // with no way to tell a safe refusal from a broken command.
+        $this->convertedContent(recordTheSource: false);
+
+        $this->artisan('converters:purge-sources')
+            ->expectsOutputToContain('Nothing would be destroyed.')
+            ->expectsOutputToContain('1 content(s) were left alone:')
+            ->expectsOutputToContain('converted before the panel recorded which source row it hid')
+            ->expectsOutputToContain(self::CONTENT)
+            ->expectsOutputToContain('--unrecorded allows them')
+            ->assertSuccessful();
+    }
+
+    public function test_the_reasons_are_grouped_rather_than_repeated_once_per_content(): void
+    {
+        foreach (range(1, 3) as $n) {
+            $contentId = "B0B0B0B0-0000-0000-0000-00000000000{$n}";
+            $this->archive->addContent($contentId, profileId: 12);
+            Conversion::query()->create([
+                'content_id' => $contentId,
+                'profile_id' => 12,
+                'status' => ConversionStatus::Done,
+                'pages' => 1,
+                'finished_at' => now(),
+            ]);
+        }
+
+        $this->artisan('converters:purge-sources')
+            ->expectsOutputToContain('3 content(s) were left alone:')
+            ->expectsOutputToContain('the archive has no hidden PDF row for this content')
+            ->assertSuccessful();
+    }
+
     public function test_it_destroys_the_file_and_the_row_and_writes_down_what_it_destroyed(): void
     {
         $conversion = $this->convertedContent();
@@ -110,7 +146,7 @@ class PurgeSourcesTest extends TestCase
         $this->convertedContent(withPagesInTheArchive: false);
 
         $this->artisan('converters:purge-sources', ['--confirm' => true])
-            ->expectsOutputToContain('the archive shows 0 page image(s) and this conversion recorded 1')
+            ->expectsOutputToContain('fewer page images are on show in the archive than the conversion recorded')
             ->assertSuccessful();
 
         $this->assertFileExists($this->sourcePath());
@@ -281,7 +317,7 @@ class PurgeSourcesTest extends TestCase
         $this->convertedContent(recordTheSource: false);
 
         $this->artisan('converters:purge-sources', ['--confirm' => true])
-            ->expectsOutputToContain('converted before the panel recorded which source it hid')
+            ->expectsOutputToContain('converted before the panel recorded which source row it hid')
             ->assertSuccessful();
 
         $this->assertFileExists($this->sourcePath());
@@ -314,7 +350,7 @@ class PurgeSourcesTest extends TestCase
         $this->convertedContent(recordTheSource: false);
 
         $this->artisan('converters:purge-sources', ['--unrecorded' => true, '--confirm' => true])
-            ->expectsOutputToContain('no record of which one it converted')
+            ->expectsOutputToContain('several hidden PDF rows and no record of which one was converted')
             ->assertSuccessful();
 
         $this->assertSame([], $this->archive->hardDeletedSources());
@@ -329,7 +365,7 @@ class PurgeSourcesTest extends TestCase
         $this->archive->softDeleteSource($conversion->pages()->orderBy('seq')->first()->mvd_id);
 
         $this->artisan('converters:purge-sources', ['--confirm' => true])
-            ->expectsOutputToContain('page image(s) and this conversion recorded 3')
+            ->expectsOutputToContain('2 on show, 3 recorded')
             ->assertSuccessful();
 
         $this->assertFileExists($this->sourcePath());
