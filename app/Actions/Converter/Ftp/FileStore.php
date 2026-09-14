@@ -38,6 +38,19 @@ interface FileStore
     public function size(string $remotePath): ?int;
 
     /**
+     * A path on this machine's own filesystem that already holds $remotePath, or null when there
+     * isn't one and the file has to be copied to be read.
+     *
+     * It is how the pipeline skips a copy when the panel runs on the machine that holds the archive:
+     * the renderer opens the archive's own file instead of a duplicate of it in the workspace. Null
+     * is always a safe answer - the caller falls back to download() - and so is null for a file that
+     * is not there, because download() is what reports that properly.
+     *
+     * The path is only ever read from.
+     */
+    public function localPath(string $remotePath): ?string;
+
+    /**
      * Removes a file. A file that is already gone is not an error.
      */
     public function delete(string $remotePath): void;

@@ -55,6 +55,11 @@ class SqlServerArchive implements ArchiveGateway
     private const string FORMAT_IMAGE_LIKE = 'image/%';
 
     /**
+     * Matches a source PDF however the archive spelled it ("Application/pdf", "application/PDF").
+     */
+    private const string FORMAT_PDF_LIKE = '%pdf%';
+
+    /**
      * SQL Server refuses a statement with more than 2100 parameters, so a large undo is split.
      */
     private const int MAX_IDS_PER_DELETE = 500;
@@ -249,6 +254,28 @@ class SqlServerArchive implements ArchiveGateway
         return $this->sourceFiles($sql, [$contentId, self::FORMAT_IMAGE_LIKE]);
     }
 
+    public function livePageIdsFor(string $contentId): array
+    {
+        $sql = <<<'SQL'
+            SELECT ID
+            FROM MVDContent
+            WHERE ContentID = ?
+              AND Format LIKE ?
+              AND Deleted = 0
+            SQL;
+
+        return array_map(
+            fn (object $row): string => self::text($row->ID),
+            $this->connection->select($sql, [$contentId, self::FORMAT_IMAGE_LIKE]),
+        );
+    }
+
+    public function sourceRowExists(string $mvdId): bool
+    {
+        // Deleted is not filtered on purpose: the question is whether the row is there at all.
+        return $this->connection->selectOne('SELECT TOP (1) ID FROM MVDContent WHERE ID = ?', [$mvdId]) !== null;
+    }
+
     public function profileIdFor(string $contentId): ?int
     {
         $row = $this->connection->selectOne('SELECT TOP (1) ProfileID FROM GeneralContent WHERE ID = ?', [$contentId]);
@@ -407,7 +434,7 @@ class SqlServerArchive implements ArchiveGateway
             ORDER BY SeqPageNo
             SQL;
 
-        return $this->sourceFiles($sql, [$contentId, '%pdf%']);
+        return $this->sourceFiles($sql, [$contentId, self::FORMAT_PDF_LIKE]);
     }
 
     public function restoreSource(string $mvdId): void
@@ -415,6 +442,29 @@ class SqlServerArchive implements ArchiveGateway
         $this->write(
             'restoreSource',
             fn () => $this->connection->update('UPDATE MVDContent SET Deleted = 0 WHERE ID = ?', [$mvdId]),
+        );
+    }
+
+    public function hardDeleteSource(string $mvdId): bool
+    {
+        // Both guards are in the statement rather than only in the caller's query, and for the same
+        // reason deletePages has its own: MVDContent is where the page images live too, and
+        // ImageLayer and ThumbLayer cascade from it. An id that is not a hidden PDF row must be
+        // incapable of deleting anything here, whatever the caller believes it is passing in - a
+        // mistake would not lose a row, it would lose a converted document.
+        //
+        // Deleted = 1 carries a second meaning as well: it is the archive's record that this source
+        // has been converted. A row that is still on show has pages that are not there yet.
+        $sql = <<<'SQL'
+            DELETE FROM MVDContent
+            WHERE ID = ?
+              AND Deleted = 1
+              AND Format LIKE ?
+            SQL;
+
+        return $this->write(
+            'hardDeleteSource',
+            fn (): bool => $this->connection->delete($sql, [$mvdId, self::FORMAT_PDF_LIKE]) > 0,
         );
     }
 

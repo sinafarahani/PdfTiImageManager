@@ -60,6 +60,26 @@ interface ArchiveGateway
      */
     public function imagePagesFor(string $contentId): array;
 
+    /**
+     * The MVDContent ids of the content's page images that are still on show.
+     *
+     * imagePagesFor() deliberately includes hidden rows, because a rollback has to find an
+     * interrupted attempt's leftovers. That makes it exactly the wrong question to ask before
+     * destroying something: a hidden page row is a page the archive no longer shows.
+     *
+     * @return list<string>
+     */
+    public function livePageIdsFor(string $contentId): array;
+
+    /**
+     * Whether an MVDContent row exists at all, hidden or not.
+     *
+     * For deciding what an interrupted destructive run actually managed to do. It cannot be answered
+     * with hiddenSourcesFor(), which only sees rows flagged deleted: a source somebody has since put
+     * back on show would read as gone.
+     */
+    public function sourceRowExists(string $mvdId): bool;
+
     public function profileIdFor(string $contentId): ?int;
 
     public function storeModeFor(int $profileId): StoreMode;
@@ -122,6 +142,20 @@ interface ArchiveGateway
      * of the original file.
      */
     public function restoreSource(string $mvdId): void;
+
+    /**
+     * Removes a converted content's source PDF row for good, and says whether there was one to remove.
+     *
+     * This is the only irreversible thing in the gateway. Everything else can be undone - pages are
+     * deleted and written again, a reservation is released, a flag is unset - but a row deleted here
+     * is gone, and with it the original file's name and the CreateDateTime that says which folder its
+     * file was in. The caller is expected to have recorded both first.
+     *
+     * The implementation must refuse to delete anything that is not a hidden PDF row. MVDContent is
+     * the table the page images live in too, and ImageLayer and ThumbLayer cascade from it, so a
+     * mistake here does not delete a row: it deletes a document.
+     */
+    public function hardDeleteSource(string $mvdId): bool;
 
     /**
      * Takes a content back to "not converted": the marker, the viewable flags and the threshold bit

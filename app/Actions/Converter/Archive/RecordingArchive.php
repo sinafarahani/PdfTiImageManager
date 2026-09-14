@@ -210,6 +210,26 @@ class RecordingArchive implements ArchiveGateway
         $this->record('restoreSource', ['mvdId' => $mvdId]);
     }
 
+    /**
+     * @return list<string>
+     */
+    public function livePageIdsFor(string $contentId): array
+    {
+        return $this->archive->livePageIdsFor($contentId);
+    }
+
+    public function sourceRowExists(string $mvdId): bool
+    {
+        return $this->archive->sourceRowExists($mvdId);
+    }
+
+    public function hardDeleteSource(string $mvdId): bool
+    {
+        $this->record('hardDeleteSource', ['mvdId' => $mvdId]);
+
+        return true;
+    }
+
     public function undoConverted(string $contentId): void
     {
         $this->record('undoConverted', ['contentId' => $contentId]);

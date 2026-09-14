@@ -104,6 +104,16 @@ class RecordingFileStore implements FileStore
         return $this->files->size($remotePath);
     }
 
+    /**
+     * Whatever the store underneath says. Reading a file in place is the one operation here that
+     * changes nothing, so a rehearsal can do exactly what the live run would - and on a disk-mode
+     * server it has to, or converters:try would rehearse a path production never takes.
+     */
+    public function localPath(string $remotePath): ?string
+    {
+        return $this->files->localPath($remotePath);
+    }
+
     public function delete(string $remotePath): void
     {
         $this->deletions[] = $remotePath;

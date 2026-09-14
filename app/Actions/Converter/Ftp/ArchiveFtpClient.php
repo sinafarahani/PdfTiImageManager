@@ -209,6 +209,14 @@ class ArchiveFtpClient implements FileStore
         });
     }
 
+    /**
+     * Never. The whole point of this class is that the files are on another machine.
+     */
+    public function localPath(string $remotePath): ?string
+    {
+        return null;
+    }
+
     public function disconnect(): void
     {
         if ($this->connection instanceof Connection) {

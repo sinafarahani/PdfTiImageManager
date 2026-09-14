@@ -97,6 +97,40 @@ class ArchiveStatementsTest extends TestCase
         $this->assertSame([1000, 500], $statement['bindings']);
     }
 
+    public function test_hard_delete_source_can_only_ever_match_a_hidden_pdf_row(): void
+    {
+        // The most dangerous statement in the application, and the only irreversible one. MVDContent
+        // holds the page images too, and ImageLayer and ThumbLayer cascade from it, so an id that is
+        // not a hidden PDF row must be incapable of deleting anything here. Both guards belong in the
+        // statement, not only in the caller that built the id.
+        $connection = new RecordingConnection;
+
+        (new SqlServerArchive($connection, 'on'))->hardDeleteSource('8E3C2A40-0000-0000-0000-000000000001');
+
+        $expected = <<<'SQL'
+            DELETE FROM MVDContent
+            WHERE ID = ?
+              AND Deleted = 1
+              AND Format LIKE ?
+            SQL;
+
+        $statement = $connection->onlyStatement();
+
+        $this->assertSame('delete', $statement['method']);
+        $this->assertSame($expected, $statement['sql']);
+        $this->assertSame(['8E3C2A40-0000-0000-0000-000000000001', '%pdf%'], $statement['bindings']);
+    }
+
+    public function test_hard_delete_source_is_refused_unless_writes_are_on(): void
+    {
+        $connection = new RecordingConnection;
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessageMatches('/hardDeleteSource/');
+
+        (new SqlServerArchive($connection, 'off'))->hardDeleteSource('8E3C2A40-0000-0000-0000-000000000001');
+    }
+
     public function test_discover_scans_forward_from_the_watermark(): void
     {
         $connection = new RecordingConnection;

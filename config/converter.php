@@ -113,6 +113,32 @@ return [
         'seed_from_pdfconvert' => (bool) env('CONVERTER_SEED_FROM_PDFCONVERT', true),
     ],
 
+    'store' => [
+
+        /*
+         * How the panel reaches the archive's files: "ftp" talks to the site the archive names in
+         * FtpSites, "disk" opens the same folders directly.
+         *
+         * Use "disk" when the panel runs on the machine that holds the archive. The FTP server is
+         * then a round trip to localhost for files that are already on a local disk: the source PDF
+         * is copied into the workspace to be rendered and every page image is copied back out. On
+         * disk the renderer reads the archive's own file where it lies, so a conversion does one
+         * fewer full copy of the original.
+         */
+        'driver' => env('CONVERTER_STORE', 'ftp'),
+
+        /*
+         * For "disk": the folder the FTP site serves, WITHOUT the site's own folder on the end. The
+         * archive says that part itself (FtpSites.FtpServerFolder, normally "DOI") and it is appended
+         * here, so both drivers derive the path the same way and a change of site folder in the
+         * archive is followed by both.
+         *
+         * So for files that live at F:\Archive_papyrus\Data\FTP\DOI\2026\07\..., this is
+         * F:\Archive_papyrus\Data\FTP.
+         */
+        'root' => env('CONVERTER_STORE_ROOT'),
+    ],
+
     'ftp' => [
 
         // Seconds for the connect, and for every later operation. The previous pipeline set neither,

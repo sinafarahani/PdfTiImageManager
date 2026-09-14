@@ -43,6 +43,9 @@ class FakeArchive implements ArchiveGateway
     /** @var list<string> source rows put back on show by an undo */
     private array $restored = [];
 
+    /** @var list<string> source rows deleted outright by a purge */
+    private array $hardDeleted = [];
+
     /** @var list<string> contents taken back to "not converted" */
     private array $undone = [];
 
@@ -137,6 +140,14 @@ class FakeArchive implements ArchiveGateway
     public function softDeletedSources(): array
     {
         return $this->softDeleted;
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function hardDeletedSources(): array
+    {
+        return $this->hardDeleted;
     }
 
     /**
@@ -285,6 +296,71 @@ class FakeArchive implements ArchiveGateway
     public function softDeleteSource(string $mvdId): void
     {
         $this->softDeleted[] = $mvdId;
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function livePageIdsFor(string $contentId): array
+    {
+        $live = [];
+
+        foreach ($this->pages as $mvdId => $page) {
+            if ($page->contentId === $contentId && ! in_array($mvdId, $this->softDeleted, true)) {
+                $live[] = (string) $mvdId;
+            }
+        }
+
+        return $live;
+    }
+
+    public function sourceRowExists(string $mvdId): bool
+    {
+        if (isset($this->pages[$mvdId])) {
+            return true;
+        }
+
+        foreach ($this->sourceFiles as $files) {
+            foreach ($files as $file) {
+                if ($file->mvdId === $mvdId) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public function hardDeleteSource(string $mvdId): bool
+    {
+        // The real statement can only match a row that is both a PDF and already hidden, so the fake
+        // has to refuse the same ones - otherwise a test would prove a delete that production skips.
+        $hidden = in_array($mvdId, $this->softDeleted, true);
+        $isPdf = false;
+
+        foreach ($this->sourceFiles as $files) {
+            foreach ($files as $file) {
+                if ($file->mvdId === $mvdId && $file->isPdf()) {
+                    $isPdf = true;
+                }
+            }
+        }
+
+        if (! $hidden || ! $isPdf) {
+            return false;
+        }
+
+        foreach ($this->sourceFiles as $contentId => $files) {
+            $this->sourceFiles[$contentId] = array_values(array_filter(
+                $files,
+                fn (SourceFile $file): bool => $file->mvdId !== $mvdId,
+            ));
+        }
+
+        $this->softDeleted = array_values(array_diff($this->softDeleted, [$mvdId]));
+        $this->hardDeleted[] = $mvdId;
+
+        return true;
     }
 
     /**

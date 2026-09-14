@@ -9,6 +9,7 @@ use App\Actions\Converter\Ftp\FileStoreException;
 use App\Actions\Converter\Pipeline\ConversionStatus;
 use App\Models\Conversion;
 use App\Models\ConversionPage;
+use App\Models\PurgedSource;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Collection;
 
@@ -47,6 +48,27 @@ class UndoContent extends Command
         if ($conversion?->status === ConversionStatus::Claimed) {
             $this->components->error('A worker is converting this content right now.');
             $this->line('  Wait for it to finish, or run converters:reconcile if its worker is gone.');
+
+            return self::FAILURE;
+        }
+
+        // An undo puts the pages back into the source PDF they came from. If that PDF has been
+        // destroyed by converters:purge-sources there is nothing to go back to, and carrying on would
+        // delete the page images that ARE the document now and leave the content with neither.
+        if (($purged = PurgedSource::query()->where('content_id', $contentId)->get())->isNotEmpty()) {
+            $this->components->error('This content\'s source PDF was destroyed by converters:purge-sources, so there is nothing to put back.');
+
+            foreach ($purged as $record) {
+                $this->line(sprintf(
+                    '  %s (%s) was deleted from %s on %s.',
+                    $record->original_name ?: $record->mvd_id,
+                    $record->mvd_id,
+                    $record->remote_path,
+                    $record->created_at?->toDayDateTimeString() ?? 'an unknown date',
+                ));
+            }
+
+            $this->line('  Undoing would delete the page images as well, and they are the only copy of this document now.');
 
             return self::FAILURE;
         }

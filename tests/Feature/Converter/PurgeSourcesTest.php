@@ -1,0 +1,417 @@
+<?php
+
+namespace Tests\Feature\Converter;
+
+use App\Actions\Converter\Archive\ArchiveGateway;
+use App\Actions\Converter\Archive\FakeArchive;
+use App\Actions\Converter\Archive\PageInsert;
+use App\Actions\Converter\Archive\SourceFile;
+use App\Actions\Converter\Ftp\FileStore;
+use App\Actions\Converter\Ftp\LocalFileStore;
+use App\Actions\Converter\Pipeline\ConversionStatus;
+use App\Models\Conversion;
+use App\Models\ConversionSource;
+use App\Models\PurgedSource;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\File;
+use RuntimeException;
+use Tests\TestCase;
+
+class PurgeSourcesTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private const CONTENT = 'A1B2C3D4-0000-0000-0000-000000000001';
+
+    private const SOURCE_MVD = '8E3C2A40-0000-0000-0000-000000000001';
+
+    private const FOLDER = '2023/02/01/07/43/38';
+
+    private FakeArchive $archive;
+
+    private string $store;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->store = sys_get_temp_dir().DIRECTORY_SEPARATOR.'purge-store-'.uniqid();
+        File::ensureDirectoryExists($this->store);
+
+        $this->archive = new FakeArchive;
+        $this->archive->addContent(self::CONTENT, profileId: 12);
+        $this->archive->addSourceFile(self::CONTENT, new SourceFile(
+            mvdId: self::SOURCE_MVD,
+            seqPageNo: 1,
+            pageNo: 'the-original.pdf',
+            createDateTime: '2023-02-01 07:43:38',
+            format: 'Application/pdf',
+            ftpSiteId: 1,
+        ));
+
+        $this->app->instance(ArchiveGateway::class, $this->archive);
+        $this->app->instance(FileStore::class, new LocalFileStore($this->store));
+
+        config(['converter.archive.write_mode' => 'on']);
+
+        $this->putSourceFile();
+    }
+
+    protected function tearDown(): void
+    {
+        File::deleteDirectory($this->store);
+
+        parent::tearDown();
+    }
+
+    public function test_it_does_nothing_at_all_without_confirm(): void
+    {
+        $this->convertedContent();
+
+        $this->artisan('converters:purge-sources')
+            ->expectsOutputToContain('There is no way back from this')
+            ->assertSuccessful();
+
+        $this->assertFileExists($this->sourcePath());
+        $this->assertSame([], $this->archive->hardDeletedSources());
+        $this->assertSame(0, PurgedSource::query()->count());
+    }
+
+    public function test_it_destroys_the_file_and_the_row_and_writes_down_what_it_destroyed(): void
+    {
+        $conversion = $this->convertedContent();
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])
+            ->expectsOutputToContain('1 archive row(s) destroyed')
+            ->assertSuccessful();
+
+        $this->assertFileDoesNotExist($this->sourcePath());
+        $this->assertSame([self::SOURCE_MVD], $this->archive->hardDeletedSources());
+
+        // The record is the only thing left that says the original existed, so it has to carry
+        // everything that is now unrecoverable: which file, under what name, from which folder.
+        $record = PurgedSource::query()->sole();
+        $this->assertSame(self::CONTENT, $record->content_id);
+        $this->assertSame(self::SOURCE_MVD, $record->mvd_id);
+        $this->assertSame($conversion->id, $record->conversion_id);
+        $this->assertSame(self::FOLDER.'/'.self::SOURCE_MVD.'.pdf', $record->remote_path);
+        $this->assertSame('the-original.pdf', $record->original_name);
+        $this->assertSame('2023-02-01 07:43:38', $record->create_date_time);
+        $this->assertTrue($record->row_deleted);
+        $this->assertTrue($record->file_deleted);
+        $this->assertSame(5, $record->bytes);
+    }
+
+    public function test_it_refuses_a_content_the_archive_has_no_pages_for(): void
+    {
+        // The check standing between a purge and a destroyed document. A done conversion whose pages
+        // are not in the archive is one of the states the old pipeline left behind, and its source
+        // PDF is the only copy of it that exists.
+        $this->convertedContent(withPagesInTheArchive: false);
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])
+            ->expectsOutputToContain('the archive shows 0 page image(s) and this conversion recorded 1')
+            ->assertSuccessful();
+
+        $this->assertFileExists($this->sourcePath());
+        $this->assertSame([], $this->archive->hardDeletedSources());
+        $this->assertSame(0, PurgedSource::query()->count());
+    }
+
+    public function test_it_leaves_a_source_that_is_still_on_show_alone(): void
+    {
+        // Deleted = 1 is the archive's record that the pages took over from the source. A row still
+        // on show belongs to a content whose pages are not there yet, whatever our ledger says.
+        $this->convertedContent(hideTheSource: false);
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])->assertSuccessful();
+
+        $this->assertFileExists($this->sourcePath());
+        $this->assertSame([], $this->archive->hardDeletedSources());
+    }
+
+    public function test_a_conversion_that_is_not_finished_is_never_touched(): void
+    {
+        foreach ([ConversionStatus::Pending, ConversionStatus::Claimed, ConversionStatus::Failed] as $status) {
+            PurgedSource::query()->delete();
+            Conversion::query()->delete();
+            $this->convertedContent()->update(['status' => $status]);
+
+            $this->artisan('converters:purge-sources', ['--confirm' => true])->assertSuccessful();
+
+            $this->assertFileExists($this->sourcePath());
+            $this->assertSame([], $this->archive->hardDeletedSources());
+        }
+    }
+
+    public function test_a_content_converted_with_no_pages_recorded_is_never_touched(): void
+    {
+        $this->convertedContent()->update(['pages' => 0]);
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])->assertSuccessful();
+
+        $this->assertFileExists($this->sourcePath());
+    }
+
+    public function test_it_does_not_come_back_for_a_content_it_has_already_purged(): void
+    {
+        $this->convertedContent();
+        $this->artisan('converters:purge-sources', ['--confirm' => true])->assertSuccessful();
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])
+            ->expectsOutputToContain('No converted content has a source PDF left to delete.')
+            ->assertSuccessful();
+
+        $this->assertSame(1, PurgedSource::query()->count());
+    }
+
+    public function test_a_file_that_survived_an_earlier_run_is_finished_on_the_next_one(): void
+    {
+        // The row goes first on purpose, so an interruption leaves the recoverable half: the record
+        // holds the path and the file is still there to be deleted. That is the state reproduced
+        // here - the archive row really is gone, and only the file is left.
+        $this->convertedContent();
+        $this->archive->hardDeleteSource(self::SOURCE_MVD);
+        PurgedSource::query()->create([
+            'content_id' => self::CONTENT,
+            'mvd_id' => self::SOURCE_MVD,
+            'remote_path' => self::FOLDER.'/'.self::SOURCE_MVD.'.pdf',
+            'row_deleted' => true,
+            'file_deleted' => false,
+        ]);
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])->assertSuccessful();
+
+        $this->assertFileDoesNotExist($this->sourcePath());
+        $this->assertTrue(PurgedSource::query()->sole()->file_deleted);
+    }
+
+    public function test_one_content_can_be_named_on_its_own(): void
+    {
+        $this->convertedContent();
+        $other = Conversion::query()->create([
+            'content_id' => 'FFFFFFFF-0000-0000-0000-00000000000F',
+            'profile_id' => 12,
+            'status' => ConversionStatus::Done,
+            'pages' => 3,
+            'finished_at' => now(),
+        ]);
+
+        $this->artisan('converters:purge-sources', ['--content' => [self::CONTENT], '--confirm' => true])
+            ->assertSuccessful();
+
+        $this->assertSame([self::SOURCE_MVD], $this->archive->hardDeletedSources());
+        $this->assertSame(0, PurgedSource::query()->where('content_id', $other->content_id)->count());
+    }
+
+    /**
+     * A content this panel converted: its source hidden and recorded as ours, and its page in the
+     * archive - the state the purge is designed for.
+     */
+    private function convertedContent(
+        bool $withPagesInTheArchive = true,
+        bool $hideTheSource = true,
+        bool $recordTheSource = true,
+        int $pages = 1,
+    ): Conversion {
+        if ($hideTheSource) {
+            $this->archive->softDeleteSource(self::SOURCE_MVD);
+        }
+
+        $conversion = Conversion::query()->create([
+            'content_id' => self::CONTENT,
+            'profile_id' => 12,
+            'status' => ConversionStatus::Done,
+            'pages' => $pages,
+            'finished_at' => now(),
+        ]);
+
+        if ($withPagesInTheArchive) {
+            foreach (range(1, $pages) as $seq) {
+                $mvdId = $this->archive->insertPage(new PageInsert(
+                    contentId: self::CONTENT,
+                    seqPageNo: $seq,
+                    createDateTime: '2026-09-14 10:00:00',
+                    format: 'Image/jpg',
+                    ftpSiteId: 1,
+                    thumbnail: 'x',
+                ));
+
+                $conversion->pages()->create(['seq' => $seq, 'mvd_id' => $mvdId, 'uploaded' => true]);
+            }
+        }
+
+        if ($recordTheSource) {
+            ConversionSource::query()->create([
+                'conversion_id' => $conversion->id,
+                'content_id' => self::CONTENT,
+                'mvd_id' => self::SOURCE_MVD,
+            ]);
+        }
+
+        return $conversion;
+    }
+
+    public function test_it_will_not_touch_a_pdf_the_panel_did_not_hide_itself(): void
+    {
+        // The worst thing this command could do. A content can carry PDF rows an archive user deleted
+        // in the viewer years ago: never rendered, no pages anywhere, and recoverable by unsetting one
+        // flag. hiddenSourcesFor() returns those alongside ours and cannot tell them apart.
+        $this->archive->addSourceFile(self::CONTENT, new SourceFile(
+            mvdId: 'DEADBEEF-0000-0000-0000-00000000000B',
+            seqPageNo: 2,
+            pageNo: 'an-older-revision.pdf',
+            createDateTime: '2019-05-05 05:05:05',
+            format: 'Application/pdf',
+            ftpSiteId: 1,
+        ));
+        $this->archive->softDeleteSource('DEADBEEF-0000-0000-0000-00000000000B');
+
+        $this->convertedContent();
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])->assertSuccessful();
+
+        // Ours went; the older revision is untouched and still restorable.
+        $this->assertSame([self::SOURCE_MVD], $this->archive->hardDeletedSources());
+        $this->assertSame(0, PurgedSource::query()->where('mvd_id', 'DEADBEEF-0000-0000-0000-00000000000B')->count());
+    }
+
+    public function test_a_content_converted_before_the_panel_recorded_its_sources_is_refused(): void
+    {
+        $this->convertedContent(recordTheSource: false);
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])
+            ->expectsOutputToContain('converted before the panel recorded which source it hid')
+            ->assertSuccessful();
+
+        $this->assertFileExists($this->sourcePath());
+        $this->assertSame([], $this->archive->hardDeletedSources());
+    }
+
+    public function test_unrecorded_allows_it_only_when_there_is_one_hidden_pdf_to_be_wrong_about(): void
+    {
+        // With exactly one hidden PDF row it is provably the one the conversion hid, because a
+        // conversion always hides its own.
+        $this->convertedContent(recordTheSource: false);
+
+        $this->artisan('converters:purge-sources', ['--unrecorded' => true, '--confirm' => true])
+            ->assertSuccessful();
+
+        $this->assertSame([self::SOURCE_MVD], $this->archive->hardDeletedSources());
+    }
+
+    public function test_unrecorded_still_refuses_when_there_are_two_hidden_pdfs(): void
+    {
+        $this->archive->addSourceFile(self::CONTENT, new SourceFile(
+            mvdId: 'DEADBEEF-0000-0000-0000-00000000000B',
+            seqPageNo: 2,
+            pageNo: 'an-older-revision.pdf',
+            createDateTime: '2019-05-05 05:05:05',
+            format: 'Application/pdf',
+            ftpSiteId: 1,
+        ));
+        $this->archive->softDeleteSource('DEADBEEF-0000-0000-0000-00000000000B');
+        $this->convertedContent(recordTheSource: false);
+
+        $this->artisan('converters:purge-sources', ['--unrecorded' => true, '--confirm' => true])
+            ->expectsOutputToContain('no record of which one it converted')
+            ->assertSuccessful();
+
+        $this->assertSame([], $this->archive->hardDeletedSources());
+        $this->assertFileExists($this->sourcePath());
+    }
+
+    public function test_it_refuses_when_fewer_pages_are_on_show_than_the_conversion_recorded(): void
+    {
+        // The state an interrupted converters:undo leaves: a Done conversion whose pages are half
+        // deleted. "At least one page row exists" would strip the source off a document mid-undo.
+        $conversion = $this->convertedContent(pages: 3);
+        $this->archive->softDeleteSource($conversion->pages()->orderBy('seq')->first()->mvd_id);
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])
+            ->expectsOutputToContain('page image(s) and this conversion recorded 3')
+            ->assertSuccessful();
+
+        $this->assertFileExists($this->sourcePath());
+        $this->assertSame([], $this->archive->hardDeletedSources());
+    }
+
+    public function test_it_refuses_everything_when_the_archive_is_not_accepting_writes(): void
+    {
+        // Discovering this halfway through used to leave a record claiming a content was purged when
+        // nothing had been - which then hid that content from every later run.
+        config(['converter.archive.write_mode' => 'off']);
+        $this->convertedContent();
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])
+            ->expectsOutputToContain('not accepting writes')
+            ->assertFailed();
+
+        $this->assertSame(0, PurgedSource::query()->count());
+        $this->assertFileExists($this->sourcePath());
+    }
+
+    public function test_a_record_left_by_a_failed_archive_delete_does_not_hide_the_content_for_ever(): void
+    {
+        $this->convertedContent();
+        $archive = new class extends FakeArchive
+        {
+            public function hardDeleteSource(string $mvdId): bool
+            {
+                throw new RuntimeException('the archive is not answering');
+            }
+        };
+        $archive->addContent(self::CONTENT, profileId: 12);
+        $archive->addSourceFile(self::CONTENT, new SourceFile(
+            mvdId: self::SOURCE_MVD, seqPageNo: 1, pageNo: 'the-original.pdf',
+            createDateTime: '2023-02-01 07:43:38', format: 'Application/pdf', ftpSiteId: 1,
+        ));
+        $archive->softDeleteSource(self::SOURCE_MVD);
+        $archive->insertPage(new PageInsert(
+            contentId: self::CONTENT, seqPageNo: 1, createDateTime: '2026-09-14 10:00:00',
+            format: 'Image/jpg', ftpSiteId: 1, thumbnail: 'x',
+        ));
+        $this->app->instance(ArchiveGateway::class, $archive);
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])->assertSuccessful();
+
+        // Nothing was destroyed, so nothing may claim it was: a record here would exclude the content
+        // from eligible() for good.
+        $this->assertSame(0, PurgedSource::query()->count());
+        $this->assertFileExists($this->sourcePath());
+    }
+
+    public function test_a_file_is_never_deleted_while_its_archive_row_is_still_there(): void
+    {
+        // The recovery pass asks the row itself, ignoring Deleted, because converters:undo may have
+        // put the source back on show since - and hiddenSourcesFor() would read that as "gone".
+        $this->convertedContent();
+        PurgedSource::query()->create([
+            'content_id' => self::CONTENT,
+            'mvd_id' => self::SOURCE_MVD,
+            'remote_path' => self::FOLDER.'/'.self::SOURCE_MVD.'.pdf',
+            'row_deleted' => false,
+            'file_deleted' => false,
+        ]);
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])
+            ->expectsOutputToContain('its archive row is still there')
+            ->assertSuccessful();
+
+        $this->assertFileExists($this->sourcePath());
+    }
+
+    private function putSourceFile(): void
+    {
+        $folder = $this->store.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, self::FOLDER);
+        File::ensureDirectoryExists($folder);
+        File::put($folder.DIRECTORY_SEPARATOR.self::SOURCE_MVD.'.pdf', 'a pdf');
+    }
+
+    private function sourcePath(): string
+    {
+        return $this->store.DIRECTORY_SEPARATOR
+            .str_replace('/', DIRECTORY_SEPARATOR, self::FOLDER)
+            .DIRECTORY_SEPARATOR.self::SOURCE_MVD.'.pdf';
+    }
+}

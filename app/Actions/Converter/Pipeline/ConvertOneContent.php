@@ -11,6 +11,7 @@ use App\Actions\Converter\Render\PageRenderer;
 use App\Actions\Converter\Render\RenderFailed;
 use App\Actions\Converter\Render\Thumbnailer;
 use App\Models\Conversion;
+use App\Models\ConversionSource;
 use Closure;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\File;
@@ -86,8 +87,11 @@ class ConvertOneContent
             }
 
             $stage = Stage::Metadata;
-            $this->rollBack($conversion);
 
+            // Read before rolling anything back, not after. A content with no PDF row is one this
+            // attempt cannot convert whatever happens next, and rolling back first would delete the
+            // pages of the attempt that DID convert it - which, since the source can now be destroyed
+            // outright by converters:purge-sources, is the whole document rather than a re-do.
             $sources = array_values(array_filter(
                 $this->archive->sourceFilesFor($contentId),
                 fn (SourceFile $file): bool => $file->isPdf(),
@@ -100,6 +104,10 @@ class ConvertOneContent
 
                 return;
             }
+
+            // Only now: there is a source to convert, so whatever a previous attempt left behind is
+            // genuinely a leftover rather than the only copy of the document.
+            $this->rollBack($conversion);
 
             $siteId = $this->archive->currentFileSite()->id;
             $storesImageInDatabase = $this->archive
@@ -125,7 +133,17 @@ class ConvertOneContent
                     $pdf = $workspace.DIRECTORY_SEPARATOR.$source->remoteFileName();
 
                     try {
-                        $this->files->download($remote, $pdf);
+                        // When the file store is a folder on this machine there is nothing to copy:
+                        // the renderer opens the archive's own file where it lies. On a 40 MB PDF
+                        // that is one full read and one full write saved per content, and the
+                        // workspace never holds a second copy of the original. The file is only read.
+                        $inPlace = $this->files->localPath($remote);
+
+                        if ($inPlace !== null) {
+                            $pdf = $inPlace;
+                        } else {
+                            $this->files->download($remote, $pdf);
+                        }
                     } catch (FileStoreException $exception) {
                         // Thousands of the archive's rows name a file that is not on the site any more.
                         // There is nothing to convert and nothing to wait for, so the content is given
@@ -221,7 +239,7 @@ class ConvertOneContent
                 // would see no PDF row, mark the content failed for good, and the pages of the
                 // attempt it is retrying are gone. A source still visible is cosmetic by comparison.
                 foreach ($sources as $source) {
-                    $this->hideSource($source->mvdId);
+                    $this->hideSource($conversion, $source->mvdId);
                 }
             } finally {
                 // Neither the stage nor an exception from here may hide why the conversion failed:
@@ -464,10 +482,22 @@ class ConvertOneContent
      * exist. A failure is logged and no more: by the time this runs the pages are stored and the
      * content is converted, and failing it now would delete the very pages that succeeded.
      */
-    private function hideSource(string $mvdId): void
+    private function hideSource(Conversion $conversion, string $mvdId): void
     {
         try {
             $this->archive->softDeleteSource($mvdId);
+
+            // Recorded only after the archive accepted it, and only for the row this conversion hid
+            // itself. A content can have other PDF rows that were already flagged deleted long ago -
+            // an old revision somebody removed in the viewer - which were never rendered and are
+            // recoverable by unsetting that flag. Nothing else can tell them apart afterwards, and
+            // converters:purge-sources destroys exactly what is listed here.
+            ConversionSource::query()->updateOrCreate([
+                'conversion_id' => $conversion->id,
+                'mvd_id' => $mvdId,
+            ], [
+                'content_id' => $conversion->content_id,
+            ]);
         } catch (Throwable $exception) {
             report($exception);
 

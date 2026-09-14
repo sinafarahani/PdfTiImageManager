@@ -246,6 +246,11 @@ class ConvertOneContentTest extends TestCase
             {
                 throw FileStoreException::transient('the data connection dropped');
             }
+
+            public function localPath(string $remotePath): ?string
+            {
+                return null;
+            }
         };
 
         $conversion = $this->claimedConversion();
@@ -255,6 +260,75 @@ class ConvertOneContentTest extends TestCase
         $conversion->refresh();
         $this->assertSame(ConversionStatus::Pending, $conversion->status);
         $this->assertSame(Stage::Download, $conversion->failure_stage);
+    }
+
+    public function test_a_store_on_this_machine_is_read_where_it_lies_instead_of_being_copied(): void
+    {
+        // The point of CONVERTER_STORE=disk: when the panel runs on the machine that holds the
+        // archive, copying a 40 MB PDF into the workspace to read it is a full read and a full write
+        // of the same bytes for nothing.
+        $copied = false;
+        $store = new class($this->store, $copied) extends LocalFileStore
+        {
+            public function __construct(string $root, private bool &$copied)
+            {
+                parent::__construct($root);
+            }
+
+            public function download(string $remotePath, string $localPath): int
+            {
+                $this->copied = true;
+
+                return parent::download($remotePath, $localPath);
+            }
+        };
+
+        $conversion = $this->claimedConversion();
+
+        // A plain LocalFileStore, i.e. CONVERTER_STORE=disk.
+        $this->pipeline(store: $store)->convert($conversion);
+
+        $this->assertSame(ConversionStatus::Done, $conversion->refresh()->status);
+        $this->assertFalse($copied, 'the source PDF was copied into the workspace anyway');
+
+        // The pages still went in, so reading in place did not cost anything downstream.
+        $this->assertNotSame([], $this->archive->pages());
+
+        // And the archive's own file is untouched: it is only ever read from.
+        $this->assertFileExists(
+            $this->store.DIRECTORY_SEPARATOR
+                .str_replace('/', DIRECTORY_SEPARATOR, '2023/02/01/07/43/38')
+                .DIRECTORY_SEPARATOR.self::SOURCE_MVD.'.pdf'
+        );
+    }
+
+    public function test_a_store_whose_root_is_not_there_is_a_fault_and_not_a_missing_document(): void
+    {
+        // "Missing" is the archive's death sentence: the content is failed on the first attempt and
+        // marked beyond help, so discovery never offers it again. An unmounted volume or a typo in
+        // CONVERTER_STORE_ROOT would otherwise bury every content the converters could reach.
+        $conversion = $this->claimedConversion();
+
+        $this->pipeline(store: new LocalFileStore($this->store.'-not-mounted'))->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Pending, $conversion->status, 'a missing store must be retried, not buried');
+        $this->assertSame(Stage::Download, $conversion->failure_stage);
+        $this->assertSame([], $this->archive->failedContents());
+    }
+
+    public function test_a_source_that_is_gone_is_still_recognised_on_a_local_store(): void
+    {
+        // localPath() answering null for a missing file is deliberate: download() is the one place
+        // that decides what a missing source means, and it has to keep deciding it here.
+        File::delete($this->store.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, '2023/02/01/07/43/38').DIRECTORY_SEPARATOR.self::SOURCE_MVD.'.pdf');
+        $conversion = $this->claimedConversion();
+
+        $this->pipeline(store: new LocalFileStore($this->store))->convert($conversion);
+
+        $conversion->refresh();
+        $this->assertSame(ConversionStatus::Failed, $conversion->status);
+        $this->assertSame(Stage::Missing, $conversion->failure_stage);
     }
 
     public function test_a_damaged_pdf_is_marked_failed_in_the_archive_and_not_retried(): void
@@ -429,11 +503,30 @@ class ConvertOneContentTest extends TestCase
         $this->assertDirectoryDoesNotExist($this->workspaceRoot.DIRECTORY_SEPARATOR.self::CONTENT);
     }
 
+    /**
+     * A store that behaves like the archive's FTP site: the files are elsewhere, so every source has
+     * to be downloaded.
+     *
+     * This is the default for these tests on purpose. Production runs on FTP unless CONVERTER_STORE
+     * says otherwise, and a plain LocalFileStore hands the renderer the file where it lies - which
+     * would quietly take every test in this class off the download path and leave it untested.
+     */
+    private function remoteStore(): FileStore
+    {
+        return new class($this->store) extends LocalFileStore
+        {
+            public function localPath(string $remotePath): ?string
+            {
+                return null;
+            }
+        };
+    }
+
     private function pipeline(?FileStore $store = null, ?PageRenderer $renderer = null): ConvertOneContent
     {
         return new ConvertOneContent(
             $this->archive,
-            $store ?? new LocalFileStore($this->store),
+            $store ?? $this->remoteStore(),
             $renderer ?? new FakePageRenderer(pages: 3),
             new FakeThumbnailer,
             new ConversionQueue,

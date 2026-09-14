@@ -33,8 +33,23 @@ class LocalFileStore implements FileStore
         $path = $this->path($remotePath);
 
         if (! is_file($path)) {
-            // Absent, not merely permanent: the pipeline gives a content whose source file is gone up
-            // at once, and the two stores have to agree about that or the tests prove nothing.
+            // "Absent" is the archive's death sentence: the pipeline marks the content failed for
+            // good on the first attempt and GeneralContent.Reserved gets the beyond-help marker, so
+            // discovery never offers it again. It may only be said of a file, never of a store.
+            //
+            // The FTP client earns that verdict by asking the server - it lists the file's own folder
+            // and falls back to the folder itself, and anything it cannot establish stays transient.
+            // The same care is owed here, because an unmounted volume, a typo in CONVERTER_STORE_ROOT
+            // or a site the archive has since moved all resolve to "no file at this path" and would
+            // otherwise bury every content the converters can reach, one attempt each.
+            if (! is_dir($this->root)) {
+                throw FileStoreException::transient("The file store root {$this->root} is not there");
+            }
+
+            if (! is_dir(dirname($path))) {
+                throw FileStoreException::absent("The folder for {$path} is not there");
+            }
+
             throw FileStoreException::absent("The file {$path} is not there");
         }
 
@@ -84,7 +99,10 @@ class LocalFileStore implements FileStore
             throw FileStoreException::transient("The folder {$folder} cannot be created");
         }
 
-        $partial = $path.'.part';
+        // Named per process, not just ".part". In disk mode this folder is the archive's own, and
+        // several workers upload at once: a shared scratch name means two of them writing the same
+        // file at the same time and one renaming the other's half into place.
+        $partial = $path.'.'.getmypid().'.part';
 
         if (! @copy($localPath, $partial) || ! @rename($partial, $path)) {
             @unlink($partial);
@@ -108,6 +126,16 @@ class LocalFileStore implements FileStore
         clearstatcache(true, $path);
 
         return is_file($path) ? (int) filesize($path) : null;
+    }
+
+    public function localPath(string $remotePath): ?string
+    {
+        $path = $this->path($remotePath);
+        clearstatcache(true, $path);
+
+        // A file that is not there is null rather than an exception: the caller then falls back to
+        // download(), which is the one place that decides what a missing source means.
+        return is_file($path) && is_readable($path) ? $path : null;
     }
 
     public function delete(string $remotePath): void

@@ -107,6 +107,24 @@ class ActionTest extends TestCase
         $this->assertSame(ConverterStatus::RUNNING, app(ConverterStatus::class)->current()['status']);
     }
 
+    public function test_the_buttons_do_not_flicker_while_the_page_polls(): void
+    {
+        // wire:loading with no target matches every request the component makes, and the root polls
+        // syncState every two seconds - so both buttons spent the day disabling and re-enabling
+        // themselves. wire:target is what scopes the loading state to the action that was clicked.
+        $this->actingAs(User::factory()->admin()->create());
+
+        Livewire::test(Action::class)
+            ->assertSeeHtml('wire:submit="start"')
+            ->assertSeeHtml('wire:target="start"');
+
+        app(ConverterStatus::class)->set(ConverterStatus::RUNNING, 4);
+
+        Livewire::test(Action::class)
+            ->assertSeeHtml('wire:click="stop"')
+            ->assertSeeHtml('wire:target="stop"');
+    }
+
     #[TestWith([0])]
     #[TestWith([65])]
     #[TestWith(['abc'])]

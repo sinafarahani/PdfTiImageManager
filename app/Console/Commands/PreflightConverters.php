@@ -786,16 +786,72 @@ class PreflightConverters extends Command
      * ext-ftp directly, because the home directory and the passive-mode handshake are what an
      * operator needs to see and neither is part of the FileStore interface the pipeline uses.
      */
+    /**
+     * The folder the disk driver reads: CONVERTER_STORE_ROOT with the archive's own site folder on
+     * the end, which is how the binding builds it.
+     */
+    private function diskRoot(): string
+    {
+        $root = rtrim(trim((string) config('converter.store.root')), '\\/');
+        $folder = $this->site instanceof FtpSite ? trim($this->site->folder) : '';
+
+        return $folder === '' ? $root : $root.DIRECTORY_SEPARATOR.$folder;
+    }
+
+    /**
+     * That the disk really is the archive's, rather than a folder that merely exists.
+     *
+     * Getting this wrong is not a slow conversion, it is a silent one: every source resolves to a
+     * path that is not there, and a source that is not there is the one verdict the pipeline never
+     * retries - it marks the content beyond help and discovery never offers it again.
+     */
+    private function checkDiskRoot(): void
+    {
+        $root = $this->diskRoot();
+
+        if (! is_dir($root)) {
+            $this->failed(
+                "the disk root {$root} is not a folder on this machine",
+                'CONVERTER_STORE_ROOT must be the folder the FTP site serves, WITHOUT the site folder on the end - the archive supplies that',
+            );
+
+            return;
+        }
+
+        $this->passed("the disk root {$root} is there");
+
+        if (! is_readable($root)) {
+            $this->failed(
+                "the disk root {$root} cannot be read by this account",
+                'the service runs as a Windows account of its own; give it read access to the archive share',
+            );
+
+            return;
+        }
+
+        if (! is_writable($root)) {
+            // Reading is the source PDFs; writing is every page image the conversion produces.
+            $this->failed(
+                "the disk root {$root} cannot be written to by this account",
+                'the page images are written back into these folders, so read access alone is not enough',
+            );
+        }
+    }
+
     private function checkFileStore(): void
     {
-        $this->heading('The file store (FTP)');
+        $onDisk = strtolower(trim((string) config('converter.store.driver'))) === 'disk';
+
+        $this->heading($onDisk ? 'The file store (disk)' : 'The file store (FTP)');
 
         try {
             $store = $this->laravel->make(FileStore::class);
         } catch (Throwable $exception) {
             $this->failed(
                 'the file store could not be built: '.$exception->getMessage(),
-                'it is built from the archive\'s current FtpSites row, so fix the archive checks above first',
+                $onDisk
+                    ? 'CONVERTER_STORE is "disk", so CONVERTER_STORE_ROOT plus the archive\'s site folder must be a folder on this machine'
+                    : 'it is built from the archive\'s current FtpSites row, so fix the archive checks above first',
             );
 
             return;
@@ -807,16 +863,22 @@ class PreflightConverters extends Command
 
         if ($site instanceof FtpSite) {
             $this->openFtpSession($site);
+        } elseif ($onDisk) {
+            $this->checkDiskRoot();
         } else {
             $this->warned(
                 'the bound file store is '.$store::class.', not the archive\'s FTP site',
-                'that is a development setup; on the server FileStore must resolve to ArchiveFtpClient',
+                'that is a development setup; set CONVERTER_STORE=disk if this machine holds the archive, or leave it as "ftp" on a server that does not',
             );
         }
 
         // The store's own root, which on the FTP site is the folder every path the pipeline builds
         // hangs off.
-        $folder = $site instanceof FtpSite ? 'the site folder '.$site->folder : 'the root of '.$store::class;
+        $folder = match (true) {
+            $site instanceof FtpSite => 'the site folder '.$site->folder,
+            $onDisk => 'the disk root '.$this->diskRoot(),
+            default => 'the root of '.$store::class,
+        };
 
         try {
             $entries = $store->list('');

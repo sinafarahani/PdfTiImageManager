@@ -36,14 +36,21 @@
 
         @can('start-action')
             @if ($running)
-                <button type="button" wire:click="stop" wire:loading.attr="disabled" class="rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium text-white hover:bg-blue-800 focus:outline-hidden focus:ring-4 focus:ring-blue-300 disabled:opacity-50">
+                {{-- Targeted for the same reason as Start below, though this one was never the problem:
+                     Livewire infers a target from the element's own wire:click, so it already matched
+                     only "stop". Said explicitly so the two buttons read alike. --}}
+                <button type="button" wire:click="stop" wire:loading.attr="disabled" wire:target="stop" class="rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium text-white hover:bg-blue-800 focus:outline-hidden focus:ring-4 focus:ring-blue-300 disabled:opacity-50">
                     {{ __('Stop') }}
                 </button>
             @else
                 <form wire:submit="start" class="flex flex-wrap items-center gap-2">
                     <label for="threads" class="text-sm font-medium text-gray-900">{{ __('Contents at a time:') }}</label>
                     <input type="number" id="threads" min="1" max="64" wire:model="threads" required class="w-20 rounded-xl border-gray-300 bg-gray-50 py-2.5 text-center text-sm text-gray-900 focus:border-blue-500 focus:ring-blue-500" />
-                    <button type="submit" wire:loading.attr="disabled" class="rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium text-white hover:bg-blue-800 focus:outline-hidden focus:ring-4 focus:ring-blue-300 disabled:opacity-50">
+                    {{-- This is the button that flickered. wire:submit sits on the form, so the button
+                         itself carries no wire: directive for Livewire to infer a target from - and an
+                         untargeted wire:loading matches EVERY request the component makes, including
+                         the root's wire:poll.2s. It disabled and re-enabled itself every two seconds. --}}
+                    <button type="submit" wire:loading.attr="disabled" wire:target="start" class="rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium text-white hover:bg-blue-800 focus:outline-hidden focus:ring-4 focus:ring-blue-300 disabled:opacity-50">
                         {{ __('Start') }}
                     </button>
                 </form>
