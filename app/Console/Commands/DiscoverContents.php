@@ -30,7 +30,9 @@ class DiscoverContents extends Command
     /**
      * @var string
      */
-    protected $signature = 'converters:discover {--batch= : Contents to pull in this pass (default: converter.discovery.batch)}';
+    protected $signature = 'converters:discover
+        {--batch= : Contents to pull in one pass (default: converter.discovery.batch)}
+        {--all : Keep passing until the archive has nothing left to offer, instead of stopping after one}';
 
     /**
      * @var string
@@ -54,8 +56,18 @@ class DiscoverContents extends Command
      */
     private int $dropped = 0;
 
+    /**
+     * Contents queued across every pass this run made.
+     */
+    private int $added = 0;
+
     public function handle(ArchiveGateway $archive, ConversionQueue $queue): int
     {
+        // Artisan keeps one instance of a command and runs it again, so these have to be cleared per
+        // invocation or a second run reports the first run's totals on top of its own.
+        $this->added = 0;
+        $this->dropped = 0;
+
         $batch = (int) ($this->option('batch') ?: config('converter.discovery.batch'));
 
         if ($batch < 1) {
@@ -65,9 +77,13 @@ class DiscoverContents extends Command
         }
 
         try {
-            $added = ! $this->seeded() && (bool) config('converter.discovery.seed_from_pdfconvert')
-                ? $this->seed($archive, $queue, $batch)
-                : $this->scan($archive, $queue, $batch);
+            if (! $this->seeded() && (bool) config('converter.discovery.seed_from_pdfconvert')) {
+                $this->seed($archive, $queue, $batch);
+            } elseif ($this->option('all')) {
+                $this->scanEverything($archive, $queue, $batch);
+            } else {
+                $this->scan($archive, $queue, $batch);
+            }
         } catch (QueryException $exception) {
             // This runs from the scheduler every converter.discovery.interval_minutes, so an archive
             // that is unreachable or not configured yet must leave one line somebody can act on
@@ -88,7 +104,7 @@ class DiscoverContents extends Command
 
         $this->info(sprintf(
             'Queued %d new content(s); %d waiting, %d in the queue in total.',
-            $added,
+            $this->added,
             Conversion::query()->pending()->count(),
             Conversion::query()->count(),
         ));
@@ -111,11 +127,10 @@ class DiscoverContents extends Command
      * batch at a time and costs nothing but a few passes, because the contents it finds are already
      * queued.
      */
-    private function seed(ArchiveGateway $archive, ConversionQueue $queue, int $batch): int
+    private function seed(ArchiveGateway $archive, ConversionQueue $queue, int $batch): void
     {
         $this->info('Seeding the queue from the old pipeline (PdfConvert).');
 
-        $added = 0;
         $offset = 0;
 
         while (true) {
@@ -125,7 +140,7 @@ class DiscoverContents extends Command
                 break;
             }
 
-            $added += $queue->add($page);
+            $this->added += $queue->add($page);
 
             $this->reportDropped($queue->missing($page));
 
@@ -139,16 +154,96 @@ class DiscoverContents extends Command
         // Written only once the whole legacy queue has been read: a seed that died halfway through has
         // to run again, and re-running it costs nothing because add() ignores what is already queued.
         $this->markSeeded();
-
-        return $added;
     }
 
     /**
-     * One incremental pass: everything the archive has processed since the watermark.
+     * Passes until the archive has nothing left to offer.
+     *
+     * A pass takes at most one batch, which is what the scheduler wants: a fixed, modest amount of
+     * work every quarter of an hour, for ever. It is not what somebody filling an empty queue wants,
+     * because at 5,000 a pass and a pass every fifteen minutes, a million contents is ten days of
+     * waiting for a scan the archive could finish in an afternoon.
+     *
+     * The watermark makes this safe to stop and start: each pass resumes where the last one left off,
+     * so an interrupted run loses nothing, and a pass that runs at the same time as the scheduler's
+     * own costs only a little repeated reading - add() ignores contents already queued and the
+     * watermark never moves backwards.
      */
-    private function scan(ArchiveGateway $archive, ConversionQueue $queue, int $batch): int
+    private function scanEverything(ArchiveGateway $archive, ConversionQueue $queue, int $batch): void
     {
-        $overlap = (int) config('converter.discovery.overlap_minutes');
+        $pass = 0;
+
+        while (true) {
+            $before = $this->processedUntil();
+            $found = $this->scan($archive, $queue, $batch);
+            $pass++;
+
+            if ($found === 0) {
+                $this->line(sprintf('Pass %d found nothing; the archive has nothing further to offer.', $pass));
+
+                return;
+            }
+
+            $this->line(sprintf(
+                '  pass %d: %s content(s) read, %s queued so far, watermark at %s',
+                $pass,
+                number_format($found),
+                number_format($this->added),
+                $this->processedUntil()?->format('Y-m-d H:i:s') ?? 'the beginning',
+            ));
+
+            if ($this->dropped > 0) {
+                // reportDropped() has already said which contents and why. Carrying on would walk
+                // past them, and the watermark is deliberately still where it was.
+                $this->error('Stopping: the last pass could not queue everything it read.');
+
+                return;
+            }
+
+            // The one way this loop could run for ever: a pass that keeps reading contents but
+            // cannot move the watermark past them - every ProcessDate null, say. Reading the same
+            // batch again would do nothing but load the archive.
+            if (! $this->moved($before)) {
+                // The overlap rewound the window far enough back that it holds more than one batch,
+                // so every pass reads the same contents again and the watermark never gets past them.
+                // Harmless once every quarter of an hour; fatal in a loop. One pass without the
+                // rewind steps over them, and the next pass has its overlap back.
+                $before = $this->processedUntil();
+                $found = $this->scan($archive, $queue, $batch, rewind: false);
+                $pass++;
+
+                if ($found === 0) {
+                    // Everything the last pass read was inside the overlap and already queued, and
+                    // there is nothing beyond the watermark at all. That is the far end, not a stall.
+                    $this->line(sprintf('Pass %d found nothing beyond the watermark; the archive has nothing further to offer.', $pass));
+
+                    return;
+                }
+
+                if (! $this->moved($before)) {
+                    $this->warn('Stopping: the last pass read contents but could not advance the watermark past them.');
+
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether the watermark has moved on from where it was.
+     */
+    private function moved(?CarbonImmutable $from): bool
+    {
+        return $this->processedUntil()?->format('Y-m-d H:i:s') !== $from?->format('Y-m-d H:i:s');
+    }
+
+    /**
+     * One incremental pass: everything the archive has processed since the watermark. Returns how
+     * many contents the archive offered, which is what says whether there is any point asking again.
+     */
+    private function scan(ArchiveGateway $archive, ConversionQueue $queue, int $batch, bool $rewind = true): int
+    {
+        $overlap = $rewind ? (int) config('converter.discovery.overlap_minutes') : 0;
         $processedUntil = $this->processedUntil();
 
         // The window is rewound before every pass. A content inserted while the previous pass was
@@ -158,7 +253,7 @@ class DiscoverContents extends Command
         // contents that share one ProcessDate, which the scan cannot see the far side of.
         $found = $archive->discover($processedUntil?->subMinutes($overlap), $batch);
 
-        $added = $queue->add($found);
+        $this->added += $queue->add($found);
 
         $missing = $queue->missing($found);
 
@@ -166,7 +261,7 @@ class DiscoverContents extends Command
 
         $this->advanceTo($this->watermarkFor($found, $missing));
 
-        return $added;
+        return count($found);
     }
 
     /**

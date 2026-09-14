@@ -7,6 +7,7 @@ use App\Actions\Converter\Archive\SourceFile;
 use App\Actions\Converter\Ftp\FileStore;
 use App\Actions\Converter\Ftp\FileStoreException;
 use App\Actions\Converter\Pipeline\ConversionStatus;
+use App\Console\Commands\Concerns\WalksTheArchive;
 use App\Models\Conversion;
 use App\Models\ConversionSource;
 use App\Models\PurgedSource;
@@ -40,7 +41,12 @@ use Throwable;
  * Contents converted before the panel began recording its sources have no ledger to check, so they
  * are refused unless --unrecorded is given, and even then only when the content has exactly one
  * hidden PDF row - in which case it is provably the one the conversion hid, because a successful
- * conversion always hides its own.
+ * conversion always hides its own. --all-hidden takes the rest.
+ *
+ * --archive stops driving off the panel's queue and walks MVDContent instead, which is the only way
+ * to reach the millions the retired C# pipeline converted. The guards there are necessarily weaker
+ * and the command says so: with no ledger for those contents, what is left is the archive's own
+ * account of itself - the source flagged Deleted = 1, and page images on show for the content.
  *
  * The order within one source is row, then file, and not the other way round. A failure between them
  * has to leave the recoverable half: a row deleted with the file still there is recorded here with
@@ -49,11 +55,20 @@ use Throwable;
  */
 class PurgeSources extends Command
 {
+    use WalksTheArchive;
+
+    /**
+     * The row in conversion_watermarks that remembers how far an --archive walk has come.
+     */
+    private const WALK = 'purge-sources';
+
     /**
      * @var string
      */
     protected $signature = 'converters:purge-sources
         {--content=* : only these content ids}
+        {--archive : walk MVDContent itself instead of the panel\'s queue, so contents the old C# pipeline converted are covered too}
+        {--restart : start an --archive walk again from the beginning}
         {--limit=0 : most contents in one run, or 0 for every one of them}
         {--check=500 : contents a rehearsal asks the archive about, or 0 for every one of them}
         {--unrecorded : allow contents converted before the panel recorded its sources}
@@ -101,6 +116,10 @@ class PurgeSources extends Command
         }
 
         $this->finishInterrupted($archive, $store, $confirmed);
+
+        if ($this->option('archive')) {
+            return $this->walkTheArchive($archive, $store, $confirmed);
+        }
 
         $total = $this->eligible()->count();
 
@@ -197,6 +216,144 @@ class PurgeSources extends Command
 
         $this->newLine();
         $this->reportRefusals();
+    }
+
+    /**
+     * Walks MVDContent's hidden PDF rows and destroys the ones whose content is demonstrably
+     * converted, rather than driving off the panel's queue.
+     *
+     * The queue only ever held contents that needed converting, so the millions the retired C#
+     * pipeline converted are not in it and are unreachable any other way.
+     *
+     * The guards are necessarily different, and weaker, and that is worth being plain about. There is
+     * no conversion_pages ledger for these and no conversion_sources record, so the two checks that
+     * make the queue-driven purge exact - every page row we wrote is still there, and this is the row
+     * WE hid - cannot be made. What is left is the archive's own account of itself: the source row is
+     * flagged Deleted = 1, which is the archive saying the pages took over from it, and the content
+     * really does have page images on show. Both must hold, and neither can be waived.
+     */
+    private function walkTheArchive(ArchiveGateway $archive, FileStore $store, bool $confirmed): int
+    {
+        if ($this->option('restart')) {
+            $this->forgetCursor(self::WALK);
+        }
+
+        $budget = max(0, (int) $this->option($confirmed ? 'limit' : 'check'));
+        $after = $this->cursor(self::WALK);
+        $examined = 0;
+        $shown = 0;
+
+        $this->line(sprintf(
+            '%s MVDContent for converted sources to destroy%s.',
+            $confirmed ? 'Walking' : 'Rehearsing over',
+            $after === null ? ' (from the beginning)' : ", carrying on after {$after}",
+        ));
+
+        if (! $confirmed) {
+            $this->components->warn('In this mode the panel has no ledger for these contents, so the archive itself is the only witness that they were converted.');
+        }
+
+        while ($budget === 0 || $examined < $budget) {
+            $page = $archive->hiddenSourcesAfter($after, $budget === 0 ? 200 : min(200, $budget - $examined));
+
+            if ($page === []) {
+                if ($confirmed) {
+                    $this->forgetCursor(self::WALK);
+                }
+
+                break;
+            }
+
+            foreach ($page as $source) {
+                $examined++;
+                $after = $source->mvdId;
+
+                $contentId = (string) ($source->contentId ?? '');
+
+                if ($contentId === '' || $archive->livePageIdsFor($contentId) === []) {
+                    // No pages on show means this source is all there is of the document, whatever
+                    // its flag says. That is the state the old pipeline left 10,601 contents in.
+                    $this->refuse('the archive has no page images on show for this content', $contentId ?: $source->mvdId);
+
+                    continue;
+                }
+
+                if (! $confirmed) {
+                    if ($shown++ < 10) {
+                        $this->line(sprintf('    %s  %s/%s', $contentId, $source->remoteFolder(), $source->remoteFileName()));
+                    }
+
+                    $this->rowsDestroyed++;
+
+                    continue;
+                }
+
+                $this->destroyRow($archive, $store, $source, $contentId);
+            }
+
+            if ($confirmed) {
+                $this->rememberCursor(self::WALK, (string) $after);
+            }
+        }
+
+        $this->newLine();
+        $this->components->twoColumnDetail('hidden source rows examined', number_format($examined));
+        $this->components->twoColumnDetail(
+            $confirmed ? '<fg=yellow>source PDFs destroyed</>' : '<fg=yellow>source PDFs that would be destroyed</>',
+            '<fg=yellow>'.number_format($this->rowsDestroyed).'</>',
+        );
+        $this->components->twoColumnDetail('files deleted', number_format($this->filesDeleted));
+
+        $this->newLine();
+
+        if (! $confirmed) {
+            $this->components->warn('There is no way back from this. Run it again with --confirm to do it.');
+        } else {
+            $this->line('  Where it got to is remembered; run it again to carry on, or --restart to begin again.');
+        }
+
+        $this->newLine();
+        $this->reportRefusals();
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * Destroys one source found by walking the archive. Same order as everywhere else: record, then
+     * the row, then the file.
+     */
+    private function destroyRow(ArchiveGateway $archive, FileStore $store, SourceFile $source, string $contentId): void
+    {
+        $remotePath = $source->remoteFolder().'/'.$source->remoteFileName();
+
+        $record = PurgedSource::query()->updateOrCreate(['mvd_id' => $source->mvdId], [
+            'content_id' => $contentId,
+            'reason' => PurgedSource::PURGED,
+            'conversion_id' => null,
+            'remote_path' => $remotePath,
+            'original_name' => $source->pageNo,
+            'create_date_time' => $source->createDateTime,
+            'bytes' => $this->sizeOf($store, $remotePath),
+        ]);
+
+        try {
+            $deleted = $archive->hardDeleteSource($source->mvdId);
+        } catch (Throwable $exception) {
+            $record->delete();
+
+            throw $exception;
+        }
+
+        if (! $deleted) {
+            $record->delete();
+
+            return;
+        }
+
+        $record->update(['row_deleted' => true]);
+        $this->rowsDestroyed++;
+
+        $this->deleteFile($store, $record);
     }
 
     /**
@@ -605,15 +762,6 @@ class PurgeSources extends Command
 
         $record->update(['file_deleted' => true]);
         $this->filesDeleted++;
-    }
-
-    private function writesAreOn(): bool
-    {
-        return in_array(
-            strtolower(trim((string) config('converter.archive.write_mode'))),
-            ['on', 'true', '1', 'yes', 'enabled'],
-            true,
-        );
     }
 
     private function sizeOf(FileStore $store, string $remotePath): ?int

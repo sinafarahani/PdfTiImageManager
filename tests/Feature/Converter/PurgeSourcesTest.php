@@ -13,6 +13,7 @@ use App\Models\Conversion;
 use App\Models\ConversionSource;
 use App\Models\PurgedSource;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use RuntimeException;
 use Tests\TestCase;
@@ -111,6 +112,74 @@ class PurgeSourcesTest extends TestCase
             ->expectsOutputToContain('3 content(s) were left alone:')
             ->expectsOutputToContain('the archive has no hidden PDF row for this content')
             ->assertSuccessful();
+    }
+
+    public function test_the_archive_walk_destroys_a_source_the_old_pipeline_converted(): void
+    {
+        // Nothing in the panel's tables knows this content exists - the queue only ever held contents
+        // that needed converting, so the millions the C# app converted are not in it.
+        $this->archive->softDeleteSource(self::SOURCE_MVD);
+        $this->archive->insertPage(new PageInsert(
+            contentId: self::CONTENT, seqPageNo: 1, createDateTime: '2026-09-14 10:00:00',
+            format: 'Image/jpg', ftpSiteId: 1, thumbnail: 'x',
+        ));
+
+        $this->assertSame(0, Conversion::query()->count());
+
+        $this->artisan('converters:purge-sources', ['--confirm' => true])
+            ->expectsOutputToContain('No converted content has a source PDF left to delete.')
+            ->assertSuccessful();
+
+        $this->artisan('converters:purge-sources', ['--archive' => true, '--confirm' => true])
+            ->assertSuccessful();
+
+        $this->assertSame([self::SOURCE_MVD], $this->archive->hardDeletedSources());
+        $this->assertFileDoesNotExist($this->sourcePath());
+        $this->assertSame(PurgedSource::PURGED, PurgedSource::query()->sole()->reason);
+    }
+
+    public function test_the_archive_walk_refuses_a_content_with_no_page_images_on_show(): void
+    {
+        // Without a ledger this is the only witness left that the content was ever converted. A
+        // hidden source with no pages is the state the old pipeline left 10,601 contents in, and its
+        // PDF is the whole document.
+        $this->archive->softDeleteSource(self::SOURCE_MVD);
+
+        $this->artisan('converters:purge-sources', ['--archive' => true, '--confirm' => true])
+            ->expectsOutputToContain('the archive has no page images on show for this content')
+            ->assertSuccessful();
+
+        $this->assertSame([], $this->archive->hardDeletedSources());
+        $this->assertFileExists($this->sourcePath());
+        $this->assertSame(0, PurgedSource::query()->count());
+    }
+
+    public function test_the_archive_walk_carries_on_where_it_stopped(): void
+    {
+        foreach (range(1, 4) as $n) {
+            $contentId = "D0D0D0D0-0000-0000-0000-00000000000{$n}";
+            $mvdId = "A000000{$n}-0000-0000-0000-000000000000";
+            $this->archive->addContent($contentId, profileId: 12);
+            $this->archive->addSourceFile($contentId, new SourceFile(
+                mvdId: $mvdId, seqPageNo: 1, pageNo: 'old.pdf',
+                createDateTime: '2019-03-03 03:03:03', format: 'Application/pdf', ftpSiteId: 1,
+            ));
+            $this->archive->softDeleteSource($mvdId);
+            $this->archive->insertPage(new PageInsert(
+                contentId: $contentId, seqPageNo: 1, createDateTime: '2026-09-14 10:00:00',
+                format: 'Image/jpg', ftpSiteId: 1, thumbnail: 'x',
+            ));
+        }
+
+        $this->artisan('converters:purge-sources', ['--archive' => true, '--limit' => 2, '--confirm' => true])
+            ->assertSuccessful();
+
+        $this->assertCount(2, $this->archive->hardDeletedSources());
+        $this->assertSame('A0000002-0000-0000-0000-000000000000', DB::table('conversion_watermarks')->where('name', 'purge-sources')->value('cursor'));
+
+        $this->artisan('converters:purge-sources', ['--archive' => true, '--confirm' => true])->assertSuccessful();
+
+        $this->assertCount(4, $this->archive->hardDeletedSources());
     }
 
     public function test_it_destroys_the_file_and_the_row_and_writes_down_what_it_destroyed(): void

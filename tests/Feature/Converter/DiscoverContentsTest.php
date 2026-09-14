@@ -132,6 +132,40 @@ class DiscoverContentsTest extends TestCase
         $this->assertSame('2025-01-07 16:50:00', $this->watermark());
     }
 
+    public function test_all_keeps_passing_until_the_archive_offers_nothing_more(): void
+    {
+        config(['converter.discovery.seed_from_pdfconvert' => false]);
+
+        // One pass takes one batch, which is what the scheduler wants and not what somebody filling
+        // an empty queue wants: at 5,000 a pass every fifteen minutes, a million contents is ten days.
+        foreach (range(1, 7) as $n) {
+            $this->archive->addContent("C{$n}", 1, CarbonImmutable::parse('2025-01-07 16:00:00')->addMinutes($n));
+        }
+
+        $this->artisan('converters:discover', ['--batch' => 2, '--all' => true])
+            ->expectsOutputToContain('the archive has nothing further to offer')
+            ->expectsOutputToContain('Queued 7 new content(s)')
+            ->assertSuccessful();
+
+        $this->assertSame(7, Conversion::query()->count());
+    }
+
+    public function test_all_stops_instead_of_reading_the_same_batch_for_ever(): void
+    {
+        config(['converter.discovery.seed_from_pdfconvert' => false]);
+
+        // The one way the loop could spin: contents it can read but cannot move the watermark past.
+        // A null ProcessDate is exactly that, and reading them again would only load the archive.
+        $this->archive->addContent('C1', 1, null);
+        $this->archive->addContent('C2', 1, null);
+
+        $this->artisan('converters:discover', ['--batch' => 2, '--all' => true])
+            ->expectsOutputToContain('could not advance the watermark past them')
+            ->assertSuccessful();
+
+        $this->assertSame(2, Conversion::query()->count());
+    }
+
     public function test_a_pass_that_finds_nothing_keeps_the_watermark_and_the_queue(): void
     {
         config(['converter.discovery.seed_from_pdfconvert' => false]);
