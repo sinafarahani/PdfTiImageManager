@@ -55,7 +55,7 @@ class PurgeSources extends Command
     protected $signature = 'converters:purge-sources
         {--content=* : only these content ids}
         {--limit=0 : most contents in one run, or 0 for every one of them}
-        {--check=500 : contents a rehearsal asks the archive about}
+        {--check=500 : contents a rehearsal asks the archive about, or 0 for every one of them}
         {--unrecorded : allow contents converted before the panel recorded its sources}
         {--all-hidden : with --unrecorded, allow contents that have more than one hidden PDF row}
         {--confirm : actually destroy them}';
@@ -248,8 +248,9 @@ class PurgeSources extends Command
         // Every content checked costs two questions to the archive, and there can be tens of
         // thousands of them, so a rehearsal checks a sample and is honest about having done so. The
         // total comes from one count and is the number that matters.
-        $check = max(1, (int) $this->option('check'));
-        $checked = min($check, $total);
+        // 0 means all, as it does for --limit, so "look at everything" is the same answer to either.
+        $check = max(0, (int) $this->option('check'));
+        $checked = $check === 0 ? $total : min($check, $total);
         $ready = 0;
         $shown = 0;
 

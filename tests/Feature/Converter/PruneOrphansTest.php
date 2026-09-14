@@ -153,6 +153,34 @@ class PruneOrphansTest extends TestCase
         $this->assertSame(0, PurgedSource::query()->count());
     }
 
+    public function test_check_zero_examines_every_content(): void
+    {
+        // 500 of 551,866 is a sample, and the run that matters is the one that looked at all of them.
+        $this->archive->softDeleteSource(self::SOURCE_MVD);
+        $this->conversion(ConversionStatus::Done);
+
+        foreach (range(1, 4) as $n) {
+            $contentId = "E0E0E0E0-0000-0000-0000-00000000000{$n}";
+            $this->archive->addContent($contentId, profileId: 12);
+            Conversion::query()->create([
+                'content_id' => $contentId,
+                'profile_id' => 12,
+                'status' => ConversionStatus::Done,
+                'pages' => 1,
+                'finished_at' => now(),
+            ]);
+        }
+
+        $this->artisan('converters:prune-orphans', ['--check' => 1])
+            ->expectsOutputToContain('--check raises this')
+            ->assertSuccessful();
+
+        $this->artisan('converters:prune-orphans', ['--check' => 0])
+            ->expectsOutputToContain('5 of 5')
+            ->doesntExpectOutputToContain('--check raises this')
+            ->assertSuccessful();
+    }
+
     public function test_it_does_nothing_without_confirm(): void
     {
         $this->archive->softDeleteSource(self::SOURCE_MVD);

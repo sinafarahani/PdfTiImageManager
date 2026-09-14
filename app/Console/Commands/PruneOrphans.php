@@ -44,7 +44,7 @@ class PruneOrphans extends Command
     protected $signature = 'converters:prune-orphans
         {--content=* : only these content ids}
         {--limit=0 : most contents in one run, or 0 for every one of them}
-        {--check=500 : contents a rehearsal examines}
+        {--check=500 : contents a rehearsal examines, or 0 for every one of them}
         {--confirm : actually delete the rows}';
 
     /**
@@ -91,16 +91,20 @@ class PruneOrphans extends Command
             return self::SUCCESS;
         }
 
+        // 0 means all, for both, so "look at everything" is the same answer to either question.
         $limit = max(0, (int) $this->option('limit'));
+        $check = max(0, (int) $this->option('check'));
+
         $wanted = $confirmed
             ? ($limit === 0 ? $total : min($limit, $total))
-            : min(max(1, (int) $this->option('check')), $total);
+            : ($check === 0 ? $total : min($check, $total));
 
         $this->line(sprintf(
-            '%s %s of %s content(s) for source rows whose file is gone.',
+            '%s %s of %s content(s) for source rows whose file is gone.%s',
             $confirmed ? 'Checking' : 'Rehearsing over',
             number_format($wanted),
             number_format($total),
+            $wanted < $total && ! $confirmed ? '  (--check raises this)' : '',
         ));
 
         $bar = $this->output->createProgressBar($wanted);
@@ -315,7 +319,17 @@ class PruneOrphans extends Command
     {
         $this->newLine();
 
-        $this->components->twoColumnDetail('contents examined', number_format($this->checked).' of '.number_format($total));
+        $this->components->twoColumnDetail(
+            'contents examined',
+            number_format($this->checked).' of '.number_format($total).($this->checked < $total && ! $confirmed ? '  (--check raises this)' : ''),
+        );
+
+        // Without this the headline reads as "nothing is wrong" when the truth may be "almost none of
+        // the contents looked at had a hidden source row to judge in the first place".
+        $this->components->twoColumnDetail(
+            'hidden source rows found in them',
+            number_format($this->rowsDeleted + $this->filesStillThere + $this->unreadable),
+        );
         $this->components->twoColumnDetail(
             $confirmed ? '<fg=yellow>source rows removed</>' : '<fg=yellow>source rows that would be removed</>',
             '<fg=yellow>'.number_format($this->rowsDeleted).'</>',
