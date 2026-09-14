@@ -25,11 +25,24 @@ use Illuminate\Database\Eloquent\Model;
 class PurgedSource extends Model
 {
     /**
+     * converters:purge-sources destroyed a converted source that was still there: the file and the
+     * row. Irreversible.
+     */
+    public const PURGED = 'purged';
+
+    /**
+     * converters:prune-orphans removed a row whose file had already been deleted by hand. Nothing was
+     * destroyed here - the document went when the file did, and this was the pointer left behind.
+     */
+    public const ORPHANED = 'orphaned';
+
+    /**
      * @var list<string>
      */
     protected $fillable = [
         'content_id',
         'mvd_id',
+        'reason',
         'conversion_id',
         'remote_path',
         'original_name',
@@ -43,6 +56,7 @@ class PurgedSource extends Model
      * @var array<string, mixed>
      */
     protected $attributes = [
+        'reason' => self::PURGED,
         'file_deleted' => false,
         'row_deleted' => false,
     ];
