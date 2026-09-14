@@ -61,6 +61,21 @@ class DiscoverContents extends Command
      */
     private int $added = 0;
 
+    /**
+     * What the last pass actually saw, so that a pass which cannot move the watermark can say why
+     * rather than only that it happened.
+     *
+     * @var array{found: int, missing: int, firstMissing: ?string, oldest: ?string, newest: ?string, advanceTo: ?string}
+     */
+    private array $lastPass = [
+        'found' => 0,
+        'missing' => 0,
+        'firstMissing' => null,
+        'oldest' => null,
+        'newest' => null,
+        'advanceTo' => null,
+    ];
+
     public function handle(ArchiveGateway $archive, ConversionQueue $queue): int
     {
         // Artisan keeps one instance of a command and runs it again, so these have to be cleared per
@@ -220,8 +235,8 @@ class DiscoverContents extends Command
                     return;
                 }
 
-                if (! $this->moved($before)) {
-                    $this->warn('Stopping: the last pass read contents but could not advance the watermark past them.');
+                if (! $this->moved($before) && ! $this->nudgePastWhatWasRead()) {
+                    $this->explainTheStall();
 
                     return;
                 }
@@ -230,11 +245,89 @@ class DiscoverContents extends Command
     }
 
     /**
+     * Moves the watermark a hair past the newest ProcessDate the last pass read, and says whether it
+     * could.
+     *
+     * The last resort against the scan wedging, which is the one failure that costs documents: a
+     * watermark that cannot move is a discovery that never finds anything again, quietly, for ever.
+     * It is only safe because of what the caller has already established - every content the pass
+     * read is provably in the queue - so stepping a microsecond past the newest of them cannot step
+     * over anything that was not stored. The overlap re-reads that ground on the next pass anyway.
+     *
+     * It should now be unreachable: the watermark keeps its fraction, so the ordinary comparison
+     * moves it. It stays because the cost of being wrong about that is a silent stall.
+     */
+    private function nudgePastWhatWasRead(): bool
+    {
+        if ($this->lastPass['missing'] > 0 || $this->lastPass['newest'] === null) {
+            return false;
+        }
+
+        $past = CarbonImmutable::parse($this->lastPass['newest'])->addMicrosecond();
+
+        DB::table('conversion_watermarks')
+            ->where('name', self::WATERMARK)
+            ->update(['processed_until' => $past->format('Y-m-d H:i:s.u'), 'updated_at' => now()]);
+
+        $this->warn(sprintf(
+            'The watermark could not be moved by the usual comparison, so it was stepped past %s; every content read was already queued.',
+            $this->lastPass['newest'],
+        ));
+
+        return true;
+    }
+
+    /**
+     * Says what the pass that could not advance actually saw.
+     *
+     * "Could not advance the watermark" on its own is a dead end: it is true of several quite
+     * different situations and tells nobody which one they are in. The watermark only moves over
+     * contents that are provably in the queue, so it stops for exactly one of two reasons - the
+     * archive offered a content this panel could not store, or it offered nothing with a ProcessDate
+     * beyond the mark - and the numbers say which.
+     */
+    private function explainTheStall(): void
+    {
+        $this->warn('Stopping: the last pass read contents but could not advance the watermark past them.');
+
+        $this->components->twoColumnDetail('the watermark is at', $this->processedUntil()?->format('Y-m-d H:i:s') ?? 'the beginning');
+        $this->components->twoColumnDetail('contents the archive offered', (string) $this->lastPass['found']);
+        $this->components->twoColumnDetail('their ProcessDates', ($this->lastPass['oldest'] ?? '-').' to '.($this->lastPass['newest'] ?? '-'));
+        $this->components->twoColumnDetail('of those, not in the queue afterwards', (string) $this->lastPass['missing']);
+
+        if ($this->lastPass['firstMissing'] !== null) {
+            $this->components->twoColumnDetail('the first of them', (string) $this->lastPass['firstMissing']);
+        }
+
+        $this->components->twoColumnDetail('the furthest the watermark could go', $this->lastPass['advanceTo'] ?? 'nowhere');
+
+        $this->newLine();
+
+        if ($this->lastPass['missing'] > 0) {
+            $this->line('  The archive offered a content that is not in the queue afterwards, so the watermark stopped');
+            $this->line('  at it deliberately: moving past a content that was never stored would hide that document for');
+            $this->line('  good. Look at why that one content will not insert - it is named above.');
+
+            return;
+        }
+
+        if ($this->lastPass['advanceTo'] !== null) {
+            $this->line('  The watermark is already at or beyond the newest ProcessDate the archive offered, so there is');
+            $this->line('  nothing further forward to move to. That is the end of the scan rather than a fault.');
+
+            return;
+        }
+
+        $this->line('  Every content offered has no ProcessDate at all, so there is nothing to move the watermark to.');
+        $this->line('  Those contents are queued if they were new; they simply cannot advance the scan.');
+    }
+
+    /**
      * Whether the watermark has moved on from where it was.
      */
     private function moved(?CarbonImmutable $from): bool
     {
-        return $this->processedUntil()?->format('Y-m-d H:i:s') !== $from?->format('Y-m-d H:i:s');
+        return $this->processedUntil()?->format('Y-m-d H:i:s.u') !== $from?->format('Y-m-d H:i:s.u');
     }
 
     /**
@@ -259,7 +352,23 @@ class DiscoverContents extends Command
 
         $this->reportDropped($missing);
 
-        $this->advanceTo($this->watermarkFor($found, $missing));
+        $advanceTo = $this->watermarkFor($found, $missing);
+
+        $dates = array_values(array_filter(array_map(
+            fn (DiscoveredContent $content): ?string => $content->processDate?->format('Y-m-d H:i:s.u'),
+            $found,
+        )));
+
+        $this->lastPass = [
+            'found' => count($found),
+            'missing' => count($missing),
+            'firstMissing' => $missing[0] ?? null,
+            'oldest' => $dates === [] ? null : $dates[0],
+            'newest' => $dates === [] ? null : max($dates),
+            'advanceTo' => $advanceTo?->format('Y-m-d H:i:s'),
+        ];
+
+        $this->advanceTo($advanceTo);
 
         return count($found);
     }
@@ -337,7 +446,10 @@ class DiscoverContents extends Command
             return;
         }
 
-        $processedUntil = $newest->format('Y-m-d H:i:s');
+        // Kept to the microsecond. Truncating to the second is what wedged the scan: a content
+        // processed at 08:15:37.123 was recorded as 08:15:37, came back on the next pass because
+        // .123 is later than .000, and truncated to the same second again.
+        $processedUntil = $newest->format('Y-m-d H:i:s.u');
 
         DB::table('conversion_watermarks')
             ->where('name', self::WATERMARK)

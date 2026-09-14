@@ -115,7 +115,10 @@ class SqlServerArchive implements ArchiveGateway
 
         if ($processedAfter !== null) {
             $sql .= "\n  AND g.ProcessDate > ?";
-            $bindings[] = $processedAfter->format('Y-m-d H:i:s');
+            // With the fraction, not truncated to the second. ProcessDate is a datetime and ticks
+            // every 3.33 ms, so asking for "> 08:15:37" hands back the content processed at
+            // 08:15:37.123 on every pass for ever and the caller's watermark can never get past it.
+            $bindings[] = $processedAfter->format('Y-m-d H:i:s.u');
         }
 
         // Oldest first, and g.ID as the tie-breaker: ProcessDate is a datetime with a 3.33 ms tick and

@@ -150,6 +150,35 @@ class DiscoverContentsTest extends TestCase
         $this->assertSame(7, Conversion::query()->count());
     }
 
+    public function test_a_process_date_with_a_fraction_does_not_wedge_the_scan(): void
+    {
+        // The bug this replaced: GeneralContent.ProcessDate is a datetime and ticks every 3.33 ms, so
+        // a watermark written as a whole second hands the content it was taken from straight back on
+        // the next pass - it is later than the truncated mark - and truncates to the same second
+        // again, so the mark can never move. Production discovery sat on one content for two days.
+        config(['converter.discovery.seed_from_pdfconvert' => false]);
+
+        $this->archive->addContent('C1', 1, CarbonImmutable::parse('2026-09-12 08:15:37.123456'));
+
+        $this->artisan('converters:discover')->assertSuccessful();
+
+        // The fraction has to survive being written down, or the next pass asks a question that
+        // includes the content it was taken from.
+        $this->assertSame(
+            '2026-09-12 08:15:37.123456',
+            CarbonImmutable::parse((string) DB::table('conversion_watermarks')->where('name', 'discovery')->value('processed_until'))->format('Y-m-d H:i:s.u'),
+        );
+
+        // The second pass must get past it rather than read it for ever.
+        $this->archive->addContent('C2', 1, CarbonImmutable::parse('2026-09-12 09:00:00.500000'));
+
+        $this->artisan('converters:discover')
+            ->expectsOutputToContain('Queued 1 new content(s)')
+            ->assertSuccessful();
+
+        $this->assertSame('2026-09-12 09:00:00', $this->watermark());
+    }
+
     public function test_all_stops_instead_of_reading_the_same_batch_for_ever(): void
     {
         config(['converter.discovery.seed_from_pdfconvert' => false]);
